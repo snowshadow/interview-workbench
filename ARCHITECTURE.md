@@ -1,4 +1,4 @@
-# Architecture
+# 架构
 
 ## 目标
 
@@ -7,22 +7,22 @@
 ## 组件
 
 ```text
-Browser (React)
-  |-- REST: 场次、简历、JD、备份、分析任务
-  |-- WebSocket: 16kHz PCM 音频与实时转录
+浏览器 (React)
+  |-- REST：场次、简历、JD、备份、分析任务
+  |-- WebSocket：16kHz PCM 音频与实时转录
   v
-Node service (Express + ws)
-  |-- Security: origin、token、security headers
-  |-- SQLite repository: 场次、转录、卡片、任务
-  |-- Attachment store: PDF/DOC/DOCX
-  |-- Analysis job service: 幂等、重试、恢复、并发
-  |-- ASR provider: Volcengine protocol adapter
-  `-- LLM provider: OpenAI-compatible adapter
+Node 服务 (Express + ws)
+  |-- 安全边界：来源、令牌、安全响应头
+  |-- SQLite 数据仓库：场次、转录、卡片、任务
+  |-- 附件存储：PDF/DOC/DOCX
+  |-- 分析任务服务：幂等、重试、恢复、并发
+  |-- ASR 服务适配器：火山引擎协议
+  `-- LLM 服务适配器：兼容 OpenAI 的接口
 
-AI Harness (Codex / Claude Code / WorkBuddy)
-  |-- Agent Skills: 筛选、准备、创建、总结
-  `-- stdio MCP: 分页读取场次并回写 Markdown 产物
-        `-- REST API -> SQLite repository
+AI 编程助手 (Codex / Claude Code / WorkBuddy)
+  |-- Agent Skill：筛选、准备、创建、总结
+  `-- 标准输入输出 MCP：分页读取场次并回写 Markdown 产物
+        `-- REST API -> SQLite 数据仓库
 ```
 
 ## 数据模型

@@ -1,4 +1,4 @@
-# Release checklist
+# 发布检查清单
 
 - [ ] 仓库中没有真实简历、转录、候选人姓名、截图、日志或 API Key
 - [ ] `.env` 未被提交，公开文档只引用 `.env.example`

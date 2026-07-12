@@ -1,7 +1,7 @@
 {
   "name": "interview-workbench",
   "version": "0.1.0",
-  "description": "Local-first realtime interview transcription and LLM follow-up workbench",
+  "description": "本地优先的实时面试转录与 AI 追问工作台",
   "private": true,
   "license": "Apache-2.0",
   "repository": {

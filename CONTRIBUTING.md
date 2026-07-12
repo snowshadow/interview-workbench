@@ -1,10 +1,9 @@
-# Contributing
+# 参与贡献
 
-1. Use Node.js 22 or newer.
-2. Copy `.env.example` to `.env` and use test credentials only.
-3. Run `npm ci`, `npm run check`, and `npm test` before opening a change.
-4. Never commit candidate data, resumes, transcripts, logs, or provider credentials.
-5. Add tests for storage migrations, provider adapters, and interview state changes.
+1. 使用 Node.js 22 或更高版本。
+2. 把 `.env.example` 复制为 `.env`，只使用测试凭证。
+3. 提交改动前运行 `npm ci`、`npm run check` 和 `npm test`。
+4. 严禁提交候选人数据、简历、转录、日志或服务凭证。
+5. 修改存储迁移、服务适配器或面试状态时，需要补充测试。
 
-Keep the default deployment local-only. Features for remote or multi-user deployment
-must include authentication, origin validation, and a documented privacy model.
+默认部署必须保持为仅本机可访问。新增远程或多用户部署能力时，必须同时提供身份认证、来源校验和明确的隐私模型。

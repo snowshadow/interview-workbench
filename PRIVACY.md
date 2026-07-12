@@ -1,20 +1,13 @@
-# Privacy and data flow
+# 隐私与数据流
 
-Interview Workbench is local-first, but configured providers receive sensitive data:
+面试工作台采用本地优先架构，但配置的外部服务仍会接收敏感数据：
 
-- The ASR provider receives microphone audio while transcription is active.
-- The LLM provider receives the selected transcript segment, interview preparation,
-  role requirements, and prior question summaries when an analysis is requested.
-- Resumes, transcripts, notes, and analysis results are stored on the local machine.
+- 实时转录开启时，ASR 服务会接收麦克风音频。
+- 用户发起 AI 追问时，LLM 服务会接收所选转录片段、面试准备、岗位要求和历史问题摘要。
+- 简历、转录、备注和分析结果保存在本机。
 
-When the local MCP server is connected, an AI harness can read interview context,
-paginated transcripts, and saved artifacts at the user's request, then write Markdown
-artifacts back to the workbench. The MCP server uses stdio and does not open another
-network port. Data sent to a model still follows the privacy settings of the selected
-harness and model provider.
+连接本地 MCP 服务后，AI 编程助手可以在用户指令下读取面试上下文、分段转录和已保存产物，并把 Markdown 产物写回工作台。MCP 服务使用标准输入输出，不会额外开放网络端口。实际发送给模型的数据仍取决于所选 AI 编程助手和模型服务的隐私设置。
 
-Users are responsible for obtaining any consent required to record or transcribe an
-interview in their jurisdiction. The application does not silently record audio.
+用户应根据所在地法律和组织制度，取得录音或转录所需的同意。应用不会在未明确操作时偷偷录音。
 
-The project should be distributed without real candidate data. Use synthetic fixtures
-in tests, screenshots, issues, and documentation.
+公开发布本项目时不得包含真实候选人数据。测试、截图、问题反馈和文档只能使用合成数据。

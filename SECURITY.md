@@ -1,21 +1,15 @@
-# Security
+# 安全说明
 
-Interview Workbench processes resumes, interview transcripts, and API credentials.
-Treat every deployment as sensitive.
+面试工作台会处理简历、面试转录和 API 凭证，所有部署都应按敏感系统对待。
 
-## Supported deployment
+## 支持的部署方式
 
-The supported default is a single-user service bound to `127.0.0.1`.
-Binding to a non-loopback address requires an access token and HTTPS through a
-trusted reverse proxy. Do not expose the development server directly.
+默认支持单用户服务，并仅监听 `127.0.0.1`。监听非本机地址时必须配置访问令牌，并通过可信的 HTTPS 反向代理提供访问。不要把开发服务直接暴露到公网。
 
-## Reporting
+## 漏洞反馈
 
-Do not include credentials, resumes, transcripts, or logs in public issues.
-Report suspected vulnerabilities privately to the repository maintainers.
+公开问题中不得包含凭证、简历、转录或日志。疑似安全漏洞应通过私密方式报告给仓库维护者。
 
-## Secrets
+## 凭证管理
 
-Credentials belong in `.env` or the process environment. They must never be
-committed. Rotate a credential immediately if it may have entered a commit,
-archive, screenshot, or public log.
+凭证只能保存在 `.env` 或进程环境变量中，严禁提交到仓库。如果凭证可能出现在提交、压缩包、截图或公开日志里，应立即轮换。
