@@ -1,0 +1,85 @@
+# Architecture
+
+## 目标
+
+面试工作台采用单用户、本地优先架构。核心原则是：候选人数据落在本机；外部 provider 只接收完成当前动作所需的数据；实时转录和 AI 分析互不阻塞；服务重启不能丢失已提交任务或错误推进分析游标。
+
+## 组件
+
+```text
+Browser (React)
+  |-- REST: 场次、简历、JD、备份、分析任务
+  |-- WebSocket: 16kHz PCM 音频与实时转录
+  v
+Node service (Express + ws)
+  |-- Security: origin、token、security headers
+  |-- SQLite repository: 场次、转录、卡片、任务
+  |-- Attachment store: PDF/DOC/DOCX
+  |-- Analysis job service: 幂等、重试、恢复、并发
+  |-- ASR provider: Volcengine protocol adapter
+  `-- LLM provider: OpenAI-compatible adapter
+```
+
+## 数据模型
+
+- `interviews`：场次元数据、状态、时间、准备材料和分析游标
+- `transcript_lines`：按场次和位置递增保存的确定转录
+- `analysis_cards`：前端展示的追问卡片
+- `analysis_jobs`：持久化任务状态、尝试次数、输入和结果
+- `attachments`：文件元数据；二进制保存在 `attachments/`
+- `jd_library` / `status_options`：可复用 JD 和自定义状态
+
+SQLite 启用 WAL、外键和 busy timeout。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
+
+## 分析状态机
+
+```text
+queued -> running -> done
+                   -> retrying -> running
+                   -> error -> queued (manual retry)
+                   -> cancelled
+```
+
+同一场次、片段边界和转录文本生成固定幂等键。只有任务到达 `done` 后，`last_processed_line_count` 才推进到卡片的 `segment_end`。失败、取消或进程重启都不会跳过转录片段。
+
+## Provider 边界
+
+ASR provider 负责凭证判断、上游连接、协议编解码、重连和标准化转录结果。核心服务只创建会话。
+
+LLM provider 负责构造受限提示词、网络超时、响应解析和 Markdown 白名单清洗。简历、JD 和转录均按不可信资料处理，不能改变系统指令或输出格式。
+
+新增 provider 时应实现同等接口并增加协议、错误分类和数据边界测试，不应把供应商逻辑放回 `server/index.js`。
+
+## 安全边界
+
+- 默认监听 `127.0.0.1`
+- 非 loopback 地址必须设置 `WORKBENCH_ACCESS_TOKEN`
+- HTTP 使用 Bearer token；浏览器 WebSocket 使用认证子协议
+- Origin 白名单同时保护 REST 和 WebSocket
+- 静态页面和 API 设置 CSP、Permissions Policy、禁止嵌入和 MIME sniffing
+- 日志按大小轮转并脱敏，不记录转录、简历、候选人姓名或 API Key
+- 删除场次后，对应附件不能继续通过公开 URL 读取
+
+这是单用户安全模型，不应被误当作多租户身份与权限系统。
+
+## 恢复与兼容
+
+首次发现旧 JSON 存储时，系统先复制备份，再事务性迁移到 SQLite。完整导入会先创建当前 SQLite 快照，然后替换数据。旧 JSON 不会被自动删除。
+
+## 目录职责
+
+```text
+server/config.js                 环境配置与部署约束
+server/security.js               HTTP/WebSocket 安全边界
+server/storage/                  SQLite repository 和迁移
+server/services/                 持久化业务任务
+server/providers/asr/            ASR adapters
+server/providers/llm/            LLM adapters
+src/api.js                       浏览器 API、认证和 WebSocket 接入
+src/interview-domain.js          场次状态、排序和日期等纯领域函数
+src/components/                  场次库和通用工作台组件
+src/App.jsx                      主工作流状态与交互编排
+test/                            存储、任务、安全和 provider 测试
+```
+
+前端已拆出 API、场次领域逻辑、场次库和通用组件。下一阶段可以继续按 `resume-pane`、`assistant-pane`、`transcript-pane` 和对应 hooks 拆分，但不应在拆分时改变持久化协议。

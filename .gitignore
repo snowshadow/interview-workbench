@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.pid
+logs/
+data/
+private/
+coverage/
+.vite/
+
+# Local recruiting material must never enter the public repository.
+*-面试准备.md
+火山文档.md
