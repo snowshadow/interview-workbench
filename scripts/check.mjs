@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
-const sourceFiles = ["vite.config.js", ...["server", "src", "scripts"]
+const sourceFiles = ["vite.config.js", ...["server", "src", "scripts", "mcp"]
   .flatMap((directory) => walk(path.join(root, directory)))
   .filter((file) => /\.(js|jsx|mjs)$/.test(file))
   .map((file) => path.relative(root, file))];

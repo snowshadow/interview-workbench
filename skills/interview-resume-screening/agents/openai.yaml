@@ -1,0 +1,6 @@
+interface:
+  display_name: "Resume Screening"
+  short_description: "Screen resume evidence against the real work in a JD"
+  default_prompt: "Use $interview-resume-screening to assess this candidate against the target JD and save the result."
+policy:
+  allow_implicit_invocation: true

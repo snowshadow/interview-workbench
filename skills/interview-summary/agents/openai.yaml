@@ -1,0 +1,6 @@
+interface:
+  display_name: "Interview Summary"
+  short_description: "Turn the full interview record into a hiring decision"
+  default_prompt: "Use $interview-summary to review this workbench interview, save the report, and do not change status without approval."
+policy:
+  allow_implicit_invocation: true

@@ -2,6 +2,10 @@
 
 一个本地优先的实时面试辅助工具。它把浏览器麦克风音频发送给流式语音识别服务，在本机保存转录、简历、备注和面试场次；面试官可以随时提交最新一段转录，让大模型生成简短的**犀利追问**和**查漏提醒**。
 
+![AI 辅助面试工作闭环](docs/assets/interview-lifecycle.png)
+
+工作台也可以通过 MCP 与 Codex、Claude Code、WorkBuddy 等 AI Harness 联动：AI 读取本机场次，完成简历筛选、面试准备、创建面试和面试总结，再把 Markdown 产物写回同一场次，面试结束后不需要手动导出转录。
+
 ## 功能
 
 - 实时转录，支持说话人分离结果和就地改名
@@ -12,6 +16,7 @@
 - SQLite 本机存储，简历附件独立保存
 - Markdown 单场导出、包含附件的完整 JSON 备份和恢复
 - 默认仅监听本机；远程部署支持访问令牌和来源限制
+- 本地 MCP Server 与四个通用 Agent Skills，支持无导出面试总结
 
 当前内置的 ASR provider 是火山引擎，LLM provider 支持 OpenAI-compatible Chat Completions API，默认配置示例使用 DeepSeek。
 
@@ -35,6 +40,27 @@ npm start
 ```
 
 打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。
+
+## AI Harness 联动
+
+仓库内置四个通用 Skill：
+
+- `interview-resume-screening`
+- `interview-preparation`
+- `interview-create-session`
+- `interview-summary`
+
+以 Codex 为例，启动工作台后连接本地 MCP Server 并安装 Skills：
+
+```bash
+codex mcp add interview-workbench \
+  --env WORKBENCH_URL=http://127.0.0.1:8787 \
+  -- node /absolute/path/to/interview-workbench/mcp/server.mjs
+
+node scripts/install-skills.mjs codex
+```
+
+之后可以直接在 Codex 中要求“总结某场面试”。Skill 会分段读取完整转录和前置产物，并把报告保存回工作台。Claude Code、WorkBuddy 和其他 Harness 的配置见 [AI Harness 接入说明](docs/AI_HARNESS_INTEGRATION.md)。
 
 ## 配置
 
@@ -64,6 +90,8 @@ data/
 ```
 
 升级旧版本时，服务会把 `data/interview-store.json` 自动迁移到 SQLite，先创建时间戳备份，并保留原文件。右上角菜单可以导出或导入包含简历附件的完整 JSON 备份。导入前，服务还会自动创建一份 SQLite 快照。
+
+筛选报告、面试准备和面试总结保存在 SQLite 的场次产物中；AI Harness 的会话 ID 也按场次记录。相同类型的产物再次保存时会覆盖当前版本，完整备份会一起包含这些数据。
 
 `data/`、`.env`、日志和本地招聘材料已从 Git 与打包产物中排除。发布前仍应运行 `npm run release:check`。
 

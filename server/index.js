@@ -51,7 +51,7 @@ app.get("/api/health", (_req, res) => {
     asrProvider: config.asr.provider,
     asrResourceId: config.asr.resourceId,
     storage: "sqlite",
-    schemaVersion: 1,
+    schemaVersion: 2,
     accessMode: config.accessToken ? "token" : "local-only",
     issues: [
       ...(!asrConfigured ? ["ASR_NOT_CONFIGURED"] : []),
@@ -100,10 +100,71 @@ app.post("/api/interviews", (req, res) => {
   }
 });
 
+app.get("/api/interviews", (req, res) => {
+  const interviews = storeRepository.listInterviews({
+    query: req.query.query,
+    status: req.query.status,
+    limit: req.query.limit,
+  });
+  res.json({ interviews });
+});
+
 app.get("/api/interviews/:interviewId", (req, res) => {
   const interview = storeRepository.getInterview(req.params.interviewId);
   if (!interview) return res.status(404).json({ error: "面试场次不存在" });
   res.json({ interview });
+});
+
+app.get("/api/interviews/:interviewId/context", (req, res) => {
+  const interview = storeRepository.getInterviewContext(req.params.interviewId);
+  if (!interview) return res.status(404).json({ error: "面试场次不存在" });
+  res.json({ interview });
+});
+
+app.get("/api/interviews/:interviewId/transcript", (req, res) => {
+  const chunk = storeRepository.getTranscriptChunk(req.params.interviewId, {
+    offset: req.query.offset,
+    limit: req.query.limit,
+  });
+  if (!chunk) return res.status(404).json({ error: "面试场次不存在" });
+  res.json(chunk);
+});
+
+app.get("/api/interviews/:interviewId/artifacts", (req, res) => {
+  if (!storeRepository.getInterviewContext(req.params.interviewId)) {
+    return res.status(404).json({ error: "面试场次不存在" });
+  }
+  res.json({ artifacts: storeRepository.listArtifacts(req.params.interviewId) });
+});
+
+app.put("/api/interviews/:interviewId/artifacts/:kind", (req, res) => {
+  try {
+    const artifact = storeRepository.upsertArtifact(req.params.interviewId, {
+      ...(req.body || {}),
+      kind: req.params.kind,
+    });
+    if (!artifact) return res.status(404).json({ error: "面试场次不存在" });
+    res.json({ artifact });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "保存面试产物失败" });
+  }
+});
+
+app.get("/api/interviews/:interviewId/harness-sessions", (req, res) => {
+  if (!storeRepository.getInterviewContext(req.params.interviewId)) {
+    return res.status(404).json({ error: "面试场次不存在" });
+  }
+  res.json({ sessions: storeRepository.listHarnessSessions(req.params.interviewId) });
+});
+
+app.post("/api/interviews/:interviewId/harness-sessions", (req, res) => {
+  try {
+    const session = storeRepository.linkHarnessSession(req.params.interviewId, req.body || {});
+    if (!session) return res.status(404).json({ error: "面试场次不存在" });
+    res.status(201).json({ session });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "关联 AI 会话失败" });
+  }
 });
 
 app.patch("/api/interviews/:interviewId", (req, res) => {

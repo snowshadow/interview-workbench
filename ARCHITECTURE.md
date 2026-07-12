@@ -18,6 +18,11 @@ Node service (Express + ws)
   |-- Analysis job service: 幂等、重试、恢复、并发
   |-- ASR provider: Volcengine protocol adapter
   `-- LLM provider: OpenAI-compatible adapter
+
+AI Harness (Codex / Claude Code / WorkBuddy)
+  |-- Agent Skills: 筛选、准备、创建、总结
+  `-- stdio MCP: 分页读取场次并回写 Markdown 产物
+        `-- REST API -> SQLite repository
 ```
 
 ## 数据模型
@@ -28,6 +33,8 @@ Node service (Express + ws)
 - `analysis_jobs`：持久化任务状态、尝试次数、输入和结果
 - `attachments`：文件元数据；二进制保存在 `attachments/`
 - `jd_library` / `status_options`：可复用 JD 和自定义状态
+- `interview_artifacts`：筛选、准备、总结等可回写 Markdown 产物
+- `harness_sessions`：场次与 Codex、Claude Code、WorkBuddy 等会话的关联
 
 SQLite 启用 WAL、外键和 busy timeout。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
 
@@ -75,6 +82,8 @@ server/storage/                  SQLite repository 和迁移
 server/services/                 持久化业务任务
 server/providers/asr/            ASR adapters
 server/providers/llm/            LLM adapters
+mcp/server.mjs                   本地 stdio MCP 与工作台 REST 适配
+skills/                           跨 Harness 的通用 Agent Skills
 src/api.js                       浏览器 API、认证和 WebSocket 接入
 src/interview-domain.js          场次状态、排序和日期等纯领域函数
 src/components/                  场次库和通用工作台组件

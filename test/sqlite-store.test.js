@@ -91,3 +91,69 @@ test("deleted interview attachments are no longer addressable", () => {
     cleanupTestConfig(config);
   }
 });
+
+test("interview artifacts and harness sessions persist and survive export", () => {
+  const sourceConfig = createTestConfig("interview-artifacts-source-");
+  const targetConfig = createTestConfig("interview-artifacts-target-");
+  const source = new SqliteStore(sourceConfig, silentLogger);
+  const target = new SqliteStore(targetConfig, silentLogger);
+  try {
+    source.createInterview(sampleInterview());
+    const first = source.upsertArtifact("candidate-1", {
+      kind: "interview-summary",
+      title: "Post-interview report",
+      markdown: "# Summary\n\nProceed.",
+      sourceHarness: "codex",
+      sourceSessionId: "thread-1",
+    });
+    source.upsertArtifact("candidate-1", {
+      kind: "interview-summary",
+      markdown: "# Summary\n\nDo not proceed.",
+      sourceHarness: "codex",
+      sourceSessionId: "thread-1",
+    });
+    const session = source.linkHarnessSession("candidate-1", {
+      harness: "codex",
+      sessionId: "thread-1",
+      label: "Agent engineer - candidate",
+      cwd: "/workspace",
+    });
+
+    assert.equal(source.listArtifacts("candidate-1").length, 1);
+    assert.equal(source.listArtifacts("candidate-1")[0].id, first.id);
+    assert.match(source.listArtifacts("candidate-1")[0].markdown, /Do not proceed/);
+    assert.equal(session.isPrimary, true);
+    assert.equal(source.getInterviewContext("candidate-1").lines, undefined);
+
+    target.importBackup(source.exportStore());
+    const imported = target.getInterview("candidate-1");
+    assert.equal(imported.artifacts[0].kind, "interview-summary");
+    assert.equal(imported.harnessSessions[0].sessionId, "thread-1");
+  } finally {
+    source.close();
+    target.close();
+    cleanupTestConfig(sourceConfig);
+    cleanupTestConfig(targetConfig);
+  }
+});
+
+test("interview listing and transcript pagination avoid loading the full transcript", () => {
+  const config = createTestConfig();
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    store.createInterview(sampleInterview());
+    const matches = store.listInterviews({ query: "示例", status: "已安排" });
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0].transcriptLineCount, 2);
+
+    const firstPage = store.getTranscriptChunk("candidate-1", { offset: 0, limit: 1 });
+    assert.equal(firstPage.lines.length, 1);
+    assert.equal(firstPage.total, 2);
+    assert.equal(firstPage.nextOffset, 1);
+    const secondPage = store.getTranscriptChunk("candidate-1", { offset: 1, limit: 1 });
+    assert.equal(secondPage.nextOffset, null);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});

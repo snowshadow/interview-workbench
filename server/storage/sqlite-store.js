@@ -129,8 +129,36 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS jobs_status_created
         ON analysis_jobs(status, created_at);
+      CREATE TABLE IF NOT EXISTS interview_artifacts (
+        id TEXT PRIMARY KEY,
+        interview_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        markdown TEXT NOT NULL,
+        source_harness TEXT NOT NULL DEFAULT '',
+        source_session_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(interview_id, kind)
+      );
+      CREATE INDEX IF NOT EXISTS artifacts_interview_updated
+        ON interview_artifacts(interview_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS harness_sessions (
+        id TEXT PRIMARY KEY,
+        interview_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+        harness TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        cwd TEXT NOT NULL DEFAULT '',
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(interview_id, harness, session_id)
+      );
+      CREATE INDEX IF NOT EXISTS harness_sessions_interview
+        ON harness_sessions(interview_id, harness, is_primary DESC);
     `);
-    this.setMeta("schema_version", "1");
+    this.setMeta("schema_version", "2");
     DEFAULT_STATUSES.forEach((status, index) => this.addStatus(status, index));
   }
 
@@ -165,7 +193,7 @@ export class SqliteStore {
       .map((row) => this.hydrateInterview(row));
     const active = this.getMeta("active_interview_id");
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       activeInterviewId: interviews.some((item) => item.id === active)
         ? active
         : interviews[0]?.id || "",
@@ -185,7 +213,7 @@ export class SqliteStore {
     const interviews = Array.isArray(store?.interviews) ? store.interviews : [];
     if (replace) {
       this.db.exec(
-        "DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interviews; DELETE FROM jd_library;",
+        "DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interview_artifacts; DELETE FROM harness_sessions; DELETE FROM interviews; DELETE FROM jd_library;",
       );
     }
     for (const [index, status] of normalizeStatuses(store?.statusOptions, interviews).entries()) {
@@ -218,6 +246,8 @@ export class SqliteStore {
       askedQuestions: Array.isArray(payload.askedQuestions) ? payload.askedQuestions : [],
       lastProcessedLineCount: Number(payload.lastProcessedLineCount || 0),
       speakerLabels: isObject(payload.speakerLabels) ? payload.speakerLabels : {},
+      artifacts: Array.isArray(payload.artifacts) ? payload.artifacts : [],
+      harnessSessions: Array.isArray(payload.harnessSessions) ? payload.harnessSessions : [],
     };
     this.transaction(() => {
       this.upsertInterviewSnapshot(interview);
@@ -231,6 +261,73 @@ export class SqliteStore {
       .prepare("SELECT * FROM interviews WHERE id = ? AND deleted_at IS NULL")
       .get(id);
     return row ? this.hydrateInterview(row) : null;
+  }
+
+  getInterviewContext(id) {
+    const row = this.db
+      .prepare("SELECT * FROM interviews WHERE id = ? AND deleted_at IS NULL")
+      .get(id);
+    return row ? this.hydrateInterview(row, { includeLines: false }) : null;
+  }
+
+  listInterviews({ query = "", status = "", limit = 50 } = {}) {
+    const normalizedQuery = cleanText(query, 160).toLowerCase();
+    const normalizedStatus = cleanText(status, 24);
+    const rows = this.db
+      .prepare(`
+        SELECT id, name, interview_status, scheduled_at, session_started_at, created_at, updated_at,
+          jd_draft_name, selected_jd_id,
+          (SELECT COUNT(*) FROM transcript_lines WHERE interview_id = interviews.id) AS transcript_line_count,
+          (SELECT COUNT(*) FROM interview_artifacts WHERE interview_id = interviews.id) AS artifact_count
+        FROM interviews
+        WHERE deleted_at IS NULL
+          AND (? = '' OR interview_status = ?)
+          AND (? = '' OR LOWER(name) LIKE '%' || ? || '%' OR LOWER(jd_draft_name) LIKE '%' || ? || '%')
+        ORDER BY COALESCE(scheduled_at, updated_at) DESC
+        LIMIT ?
+      `)
+      .all(
+        normalizedStatus,
+        normalizedStatus,
+        normalizedQuery,
+        normalizedQuery,
+        normalizedQuery,
+        Math.min(200, Math.max(1, Number(limit) || 50)),
+      );
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      interviewStatus: row.interview_status,
+      scheduledAt: row.scheduled_at || "",
+      sessionStartedAt: row.session_started_at || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      roleName: row.jd_draft_name,
+      selectedJdId: row.selected_jd_id,
+      transcriptLineCount: row.transcript_line_count,
+      artifactCount: row.artifact_count,
+    }));
+  }
+
+  getTranscriptChunk(interviewId, { offset = 0, limit = 200 } = {}) {
+    if (!this.getInterviewContext(interviewId)) return null;
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+    const total = this.db
+      .prepare("SELECT COUNT(*) AS count FROM transcript_lines WHERE interview_id = ?")
+      .get(interviewId).count;
+    const lines = this.db
+      .prepare("SELECT * FROM transcript_lines WHERE interview_id = ? ORDER BY position LIMIT ? OFFSET ?")
+      .all(interviewId, safeLimit, safeOffset)
+      .map(mapLine);
+    return {
+      interviewId,
+      offset: safeOffset,
+      limit: safeLimit,
+      total,
+      nextOffset: safeOffset + lines.length < total ? safeOffset + lines.length : null,
+      lines,
+    };
   }
 
   patchInterview(id, patch) {
@@ -391,6 +488,115 @@ export class SqliteStore {
       .run(value, order, new Date().toISOString());
   }
 
+  upsertArtifact(interviewId, artifact) {
+    if (!this.getInterviewContext(interviewId)) return null;
+    const now = new Date().toISOString();
+    const kind = cleanSlug(artifact?.kind, 80);
+    const markdown = cleanText(artifact?.markdown, 1000000);
+    if (!kind) throw new Error("Artifact kind is required");
+    if (!markdown) throw new Error("Artifact markdown is required");
+    const existing = this.db
+      .prepare("SELECT * FROM interview_artifacts WHERE interview_id = ? AND kind = ?")
+      .get(interviewId, kind);
+    const value = {
+      id: existing?.id || cleanId(artifact?.id) || crypto.randomUUID(),
+      interviewId,
+      kind,
+      title: cleanText(artifact?.title, 200) || artifactTitle(kind),
+      markdown,
+      sourceHarness: cleanSlug(artifact?.sourceHarness, 40),
+      sourceSessionId: cleanText(artifact?.sourceSessionId, 200),
+      createdAt: existing?.created_at || normalizeDate(artifact?.createdAt) || now,
+      updatedAt: now,
+    };
+    this.db.prepare(`
+      INSERT INTO interview_artifacts
+        (id, interview_id, kind, title, markdown, source_harness, source_session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(interview_id, kind) DO UPDATE SET
+        title=excluded.title, markdown=excluded.markdown,
+        source_harness=excluded.source_harness, source_session_id=excluded.source_session_id,
+        updated_at=excluded.updated_at
+    `).run(
+      value.id,
+      value.interviewId,
+      value.kind,
+      value.title,
+      value.markdown,
+      value.sourceHarness,
+      value.sourceSessionId,
+      value.createdAt,
+      value.updatedAt,
+    );
+    this.db.prepare("UPDATE interviews SET updated_at = ? WHERE id = ?").run(now, interviewId);
+    return this.listArtifacts(interviewId).find((item) => item.kind === kind);
+  }
+
+  listArtifacts(interviewId) {
+    return this.db
+      .prepare("SELECT * FROM interview_artifacts WHERE interview_id = ? ORDER BY updated_at DESC")
+      .all(interviewId)
+      .map(mapArtifact);
+  }
+
+  linkHarnessSession(interviewId, session) {
+    if (!this.getInterviewContext(interviewId)) return null;
+    const now = new Date().toISOString();
+    const harness = cleanSlug(session?.harness, 40);
+    const sessionId = cleanText(session?.sessionId, 200);
+    if (!harness || !sessionId) throw new Error("Harness and sessionId are required");
+    const makePrimary = session?.isPrimary !== false;
+    const existing = this.db.prepare(
+      "SELECT * FROM harness_sessions WHERE interview_id = ? AND harness = ? AND session_id = ?",
+    ).get(interviewId, harness, sessionId);
+    const value = {
+      id: existing?.id || cleanId(session?.id) || crypto.randomUUID(),
+      interviewId,
+      harness,
+      sessionId,
+      label: cleanText(session?.label, 160),
+      cwd: cleanText(session?.cwd, 1000),
+      isPrimary: makePrimary,
+      createdAt: existing?.created_at || normalizeDate(session?.createdAt) || now,
+      updatedAt: now,
+    };
+    this.transaction(() => {
+      if (makePrimary) {
+        this.db.prepare(
+          "UPDATE harness_sessions SET is_primary = 0, updated_at = ? WHERE interview_id = ? AND harness = ?",
+        ).run(now, interviewId, harness);
+      }
+      this.db.prepare(`
+        INSERT INTO harness_sessions
+          (id, interview_id, harness, session_id, label, cwd, is_primary, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(interview_id, harness, session_id) DO UPDATE SET
+          label=excluded.label, cwd=excluded.cwd, is_primary=excluded.is_primary,
+          updated_at=excluded.updated_at
+      `).run(
+        value.id,
+        value.interviewId,
+        value.harness,
+        value.sessionId,
+        value.label,
+        value.cwd,
+        value.isPrimary ? 1 : 0,
+        value.createdAt,
+        value.updatedAt,
+      );
+    });
+    return this.listHarnessSessions(interviewId).find(
+      (item) => item.harness === harness && item.sessionId === sessionId,
+    );
+  }
+
+  listHarnessSessions(interviewId) {
+    return this.db
+      .prepare("SELECT * FROM harness_sessions WHERE interview_id = ? ORDER BY is_primary DESC, updated_at DESC")
+      .all(interviewId)
+      .map(mapHarnessSession);
+  }
+
   createAnalysisJob({ interviewId, card, payload, idempotencyKey, maxAttempts = 3 }) {
     const existing = this.db
       .prepare("SELECT * FROM analysis_jobs WHERE idempotency_key = ?")
@@ -541,11 +747,13 @@ export class SqliteStore {
     }
   }
 
-  hydrateInterview(row) {
-    const lines = this.db
-      .prepare("SELECT * FROM transcript_lines WHERE interview_id = ? ORDER BY position")
-      .all(row.id)
-      .map(mapLine);
+  hydrateInterview(row, { includeLines = true } = {}) {
+    const lines = includeLines
+      ? this.db
+        .prepare("SELECT * FROM transcript_lines WHERE interview_id = ? ORDER BY position")
+        .all(row.id)
+        .map(mapLine)
+      : undefined;
     const cards = this.db
       .prepare("SELECT * FROM analysis_cards WHERE interview_id = ? ORDER BY position")
       .all(row.id)
@@ -568,11 +776,13 @@ export class SqliteStore {
       resumeNotes: parseJson(row.resume_notes_json, []),
       selectedJdId: row.selected_jd_id,
       jdDraftName: row.jd_draft_name,
-      lines,
+      ...(includeLines ? { lines } : {}),
       cards,
       askedQuestions,
       lastProcessedLineCount: row.last_processed_line_count,
       speakerLabels: parseJson(row.speaker_labels_json, {}),
+      artifacts: this.listArtifacts(row.id),
+      harnessSessions: this.listHarnessSessions(row.id),
     };
   }
 
@@ -584,6 +794,8 @@ export class SqliteStore {
     this.replaceLines(normalized.id, normalized.lines);
     this.replaceCards(normalized.id, normalized.cards);
     this.replaceQuestions(normalized.id, normalized.askedQuestions);
+    this.replaceArtifacts(normalized.id, normalized.artifacts);
+    this.replaceHarnessSessions(normalized.id, normalized.harnessSessions);
   }
 
   upsertInterviewRow(interview) {
@@ -674,6 +886,37 @@ export class SqliteStore {
     });
   }
 
+  replaceArtifacts(interviewId, artifacts) {
+    this.db.prepare("DELETE FROM interview_artifacts WHERE interview_id = ?").run(interviewId);
+    for (const artifact of artifacts) this.upsertArtifact(interviewId, artifact);
+  }
+
+  replaceHarnessSessions(interviewId, sessions) {
+    this.db.prepare("DELETE FROM harness_sessions WHERE interview_id = ?").run(interviewId);
+    const insert = this.db.prepare(`
+      INSERT INTO harness_sessions
+        (id, interview_id, harness, session_id, label, cwd, is_primary, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const session of sessions) {
+      const harness = cleanSlug(session?.harness, 40);
+      const sessionId = cleanText(session?.sessionId, 200);
+      if (!harness || !sessionId) continue;
+      const now = new Date().toISOString();
+      insert.run(
+        cleanId(session?.id) || crypto.randomUUID(),
+        interviewId,
+        harness,
+        sessionId,
+        cleanText(session?.label, 160),
+        cleanText(session?.cwd, 1000),
+        session?.isPrimary === false ? 0 : 1,
+        normalizeDate(session?.createdAt) || now,
+        normalizeDate(session?.updatedAt) || now,
+      );
+    }
+  }
+
   getMeta(key) {
     return this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key)?.value || "";
   }
@@ -704,6 +947,8 @@ function normalizeInterview(interview) {
     askedQuestions: Array.isArray(interview?.askedQuestions) ? interview.askedQuestions : [],
     lastProcessedLineCount: Math.max(0, Number(interview?.lastProcessedLineCount || 0)),
     speakerLabels: isObject(interview?.speakerLabels) ? interview.speakerLabels : {},
+    artifacts: Array.isArray(interview?.artifacts) ? interview.artifacts : [],
+    harnessSessions: Array.isArray(interview?.harnessSessions) ? interview.harnessSessions : [],
   };
 }
 
@@ -786,6 +1031,34 @@ function mapJd(row) {
   };
 }
 
+function mapArtifact(row) {
+  return {
+    id: row.id,
+    interviewId: row.interview_id,
+    kind: row.kind,
+    title: row.title,
+    markdown: row.markdown,
+    sourceHarness: row.source_harness,
+    sourceSessionId: row.source_session_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapHarnessSession(row) {
+  return {
+    id: row.id,
+    interviewId: row.interview_id,
+    harness: row.harness,
+    sessionId: row.session_id,
+    label: row.label,
+    cwd: row.cwd,
+    isPrimary: Boolean(row.is_primary),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function lineId(line) {
   return [line.runId || "run", line.speaker || "na", line.startTime ?? "x", line.endTime ?? "x", line.text || ""].join(":");
 }
@@ -818,6 +1091,18 @@ function cleanText(value, maxLength) {
 
 function cleanId(value) {
   return cleanText(value, 160).replace(/[^a-zA-Z0-9._:-]/g, "");
+}
+
+function cleanSlug(value, maxLength) {
+  return cleanText(value, maxLength).toLowerCase().replace(/[^a-z0-9._-]/g, "");
+}
+
+function artifactTitle(kind) {
+  return {
+    "resume-screening": "Resume screening",
+    "interview-preparation": "Interview preparation",
+    "interview-summary": "Interview summary",
+  }[kind] || kind;
 }
 
 function normalizeDate(value) {
