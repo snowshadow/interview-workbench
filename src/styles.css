@@ -339,6 +339,35 @@ button.status-picker-trigger:hover:not(:disabled) {
   gap: 8px;
 }
 
+.audio-source-segmented {
+  display: inline-flex;
+  min-height: 34px;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+}
+
+.audio-source-segmented button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.audio-source-segmented button:hover:not(:disabled) {
+  border: 0;
+  background: var(--surface-hover);
+}
+
+.audio-source-segmented button.selected {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 4px rgba(31, 31, 35, 0.12);
+}
+
 .icon-button {
   width: 36px;
   min-width: 36px;
@@ -433,6 +462,23 @@ button.status-picker-trigger:hover:not(:disabled) {
   background: #fffdf8;
   color: #774715;
   font-size: 13px;
+}
+
+.meeting-audio-hint {
+  margin: 10px 20px 0;
+  padding: 9px 12px;
+  border: 1px solid #bdd1e4;
+  border-radius: 7px;
+  background: #f2f7fc;
+  color: #355d7b;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.meeting-audio-hint svg {
+  flex: 0 0 auto;
 }
 
 .workspace {
@@ -1599,6 +1645,15 @@ button.status-picker-trigger:hover:not(:disabled) {
     justify-content: flex-start;
   }
 
+  .audio-source-segmented {
+    width: 100%;
+    order: 10;
+  }
+
+  .audio-source-segmented button {
+    flex: 1;
+  }
+
   .dialog-backdrop {
     align-items: flex-end;
     padding: 0;
@@ -1658,6 +1713,11 @@ button.status-picker-trigger:hover:not(:disabled) {
   .configuration-warning {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .meeting-audio-hint {
+    margin: 10px 12px 0;
+    align-items: flex-start;
   }
 
   .resume-upload-field {

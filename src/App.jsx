@@ -11,6 +11,7 @@ import {
   ListFilter,
   Maximize2,
   Minimize2,
+  MonitorSpeaker,
   MousePointer2,
   Mic,
   Pause,
@@ -45,6 +46,14 @@ import {
   requestJson,
   setAccessToken,
 } from "./api.js";
+import {
+  AUDIO_SOURCE_MEETING,
+  AUDIO_SOURCE_MICROPHONE,
+  audioCaptureErrorMessage,
+  buildDisplayMediaOptions,
+  createCaptureError,
+  hasAudioTrack,
+} from "./audio-capture.js";
 
 if (!Promise.withResolvers) {
   Promise.withResolvers = function withResolvers() {
@@ -102,9 +111,11 @@ function App() {
   const [resumeFocusMode, setResumeFocusMode] = useState(false);
   const [notesView, setNotesView] = useState("hidden");
   const [workspaceSplit, setWorkspaceSplit] = useState(loadWorkspaceSplit);
+  const [audioSourceMode, setAudioSourceMode] = useState(loadAudioSourceMode);
 
   const wsRef = useRef(null);
   const streamRef = useRef(null);
+  const displayStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const workletRef = useRef(null);
   const mutedGainRef = useRef(null);
@@ -116,6 +127,7 @@ function App() {
   const resumeScrollerRef = useRef(null);
   const workspaceRef = useRef(null);
   const workspaceResizeRef = useRef(null);
+  const captureAttemptRef = useRef("");
   const metadataPersistTimersRef = useRef(new Map());
 
   const activeInterview = useMemo(() => {
@@ -660,18 +672,30 @@ function App() {
   }
 
   async function startInterview() {
+    const captureAttemptId = safeId();
+    captureAttemptRef.current = captureAttemptId;
     setError("");
     setStatus("connecting");
     setPartialText("");
     pendingInputRef.current = new Float32Array(0);
     runIdRef.current = safeId();
-    updateActiveInterview((interview) => ({
-      sessionStartedAt: interview.sessionStartedAt || new Date().toISOString(),
-      interviewStatus: "面试中",
-    }));
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      let displayStream = null;
+      if (audioSourceMode === AUDIO_SOURCE_MEETING) {
+        if (!navigator.mediaDevices?.getDisplayMedia) {
+          throw createCaptureError("SYSTEM_AUDIO_UNSUPPORTED");
+        }
+        displayStream = await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaOptions());
+        if (captureAttemptRef.current !== captureAttemptId) {
+          displayStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        displayStreamRef.current = displayStream;
+        if (!hasAudioTrack(displayStream)) throw createCaptureError("SYSTEM_AUDIO_MISSING");
+      }
+
+      const microphoneStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
@@ -679,42 +703,77 @@ function App() {
           autoGainControl: true,
         },
       });
-      streamRef.current = stream;
+      if (captureAttemptRef.current !== captureAttemptId) {
+        microphoneStream.getTracks().forEach((track) => track.stop());
+        displayStream?.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      streamRef.current = microphoneStream;
+      displayStreamRef.current = displayStream;
+
+      displayStream?.getAudioTracks()[0]?.addEventListener("ended", () => {
+        if (
+          captureAttemptRef.current === captureAttemptId &&
+          displayStreamRef.current === displayStream &&
+          ["recording", "reconnecting"].includes(statusRef.current)
+        ) {
+          setError("会议声音共享已停止，当前仅转录麦克风");
+        }
+      });
+
+      updateActiveInterview((interview) => ({
+        sessionStartedAt: interview.sessionStartedAt || new Date().toISOString(),
+        interviewStatus: "面试中",
+      }));
 
       const socket = createAsrWebSocket();
       socket.binaryType = "arraybuffer";
       wsRef.current = socket;
 
       socket.onopen = async () => {
-        await startAudioCapture(stream);
-        setStatus("recording");
+        try {
+          if (captureAttemptRef.current !== captureAttemptId) return;
+          await startAudioCapture(microphoneStream, displayStream);
+          if (captureAttemptRef.current === captureAttemptId) setStatus("recording");
+        } catch (captureError) {
+          setError(captureError.message || "无法处理音频");
+          setStatus("error");
+          socket.close();
+          stopLocalAudio();
+        }
       };
       socket.onmessage = (event) => handleServerMessage(event.data);
       socket.onerror = () => {
         commitPartialTranscript();
         setError("转录连接出错");
         setStatus("error");
+        socket.close();
+        stopLocalAudio();
       };
       socket.onclose = () => {
         if (statusRef.current !== "stopped") {
           commitPartialTranscript();
           setStatus("stopped");
         }
+        stopLocalAudio();
       };
     } catch (err) {
-      setError(err.message || "无法启动麦克风");
+      if (captureAttemptRef.current !== captureAttemptId) return;
+      setError(audioCaptureErrorMessage(err, audioSourceMode));
       setStatus("error");
       stopLocalAudio();
     }
   }
 
-  async function startAudioCapture(stream) {
+  async function startAudioCapture(microphoneStream, displayStream = null) {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     audioContextRef.current = audioContext;
     await audioContext.audioWorklet.addModule("/pcm-worklet.js");
 
-    const source = audioContext.createMediaStreamSource(stream);
+    const microphoneSource = audioContext.createMediaStreamSource(microphoneStream);
+    const mixBus = audioContext.createGain();
+    mixBus.gain.value = displayStream ? 0.82 : 1;
     const worklet = new AudioWorkletNode(audioContext, "pcm-capture");
     const mutedGain = audioContext.createGain();
     mutedGain.gain.value = 0;
@@ -731,9 +790,15 @@ function App() {
       enqueueAudioChunk(event.data, audioContext.sampleRate);
     };
 
-    source.connect(worklet);
+    microphoneSource.connect(mixBus);
+    if (displayStream && hasAudioTrack(displayStream)) {
+      const displaySource = audioContext.createMediaStreamSource(displayStream);
+      displaySource.connect(mixBus);
+    }
+    mixBus.connect(worklet);
     worklet.connect(mutedGain);
     mutedGain.connect(audioContext.destination);
+    await audioContext.resume();
 
     workletRef.current = worklet;
     mutedGainRef.current = mutedGain;
@@ -839,12 +904,15 @@ function App() {
   }
 
   function stopLocalAudio() {
+    captureAttemptRef.current = "";
     workletRef.current?.disconnect();
     mutedGainRef.current?.disconnect();
     audioContextRef.current?.close().catch(() => {});
     streamRef.current?.getTracks().forEach((track) => track.stop());
+    displayStreamRef.current?.getTracks().forEach((track) => track.stop());
     wsRef.current = null;
     streamRef.current = null;
+    displayStreamRef.current = null;
     audioContextRef.current = null;
     workletRef.current = null;
     mutedGainRef.current = null;
@@ -1350,6 +1418,36 @@ function App() {
               </div>
             ) : null}
           </div>
+          <div className="audio-source-segmented" aria-label="收音方式" role="group">
+            <button
+              aria-pressed={audioSourceMode === AUDIO_SOURCE_MICROPHONE}
+              className={audioSourceMode === AUDIO_SOURCE_MICROPHONE ? "selected" : ""}
+              disabled={!canSwitchInterview}
+              onClick={() => {
+                setAudioSourceMode(AUDIO_SOURCE_MICROPHONE);
+                saveAudioSourceMode(AUDIO_SOURCE_MICROPHONE);
+              }}
+              title="只采集当前麦克风"
+              type="button"
+            >
+              <Mic size={15} />
+              麦克风
+            </button>
+            <button
+              aria-pressed={audioSourceMode === AUDIO_SOURCE_MEETING}
+              className={audioSourceMode === AUDIO_SOURCE_MEETING ? "selected" : ""}
+              disabled={!canSwitchInterview}
+              onClick={() => {
+                setAudioSourceMode(AUDIO_SOURCE_MEETING);
+                saveAudioSourceMode(AUDIO_SOURCE_MEETING);
+              }}
+              title="同时采集麦克风和腾讯会议等桌面应用声音"
+              type="button"
+            >
+              <MonitorSpeaker size={15} />
+              会议声音
+            </button>
+          </div>
           <span className="toolbar-separator" />
           {status === "idle" || status === "stopped" || status === "error" ? (
             <button className="primary" onClick={startInterview} title="开始面试">
@@ -1386,6 +1484,13 @@ function App() {
             <Settings size={15} />
             打开配置
           </button>
+        </div>
+      ) : null}
+
+      {audioSourceMode === AUDIO_SOURCE_MEETING && canSwitchInterview ? (
+        <div className="meeting-audio-hint" role="status">
+          <MonitorSpeaker size={16} />
+          <span>开始后请选择腾讯会议窗口或整个屏幕，并开启共享音频；工作台不会上传或保存屏幕画面。</span>
         </div>
       ) : null}
 
@@ -2841,20 +2946,34 @@ function clampNumber(value, min, max) {
 }
 
 function loadWorkspaceSplit() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(UI_PREF_KEY) || "null");
-    return clampNumber(Number(parsed?.workspaceSplit) || 56, 38, 72);
-  } catch {
-    return 56;
-  }
+  const preferences = readUiPreferences();
+  return clampNumber(Number(preferences.workspaceSplit) || 56, 38, 72);
 }
 
 function saveWorkspaceSplit(workspaceSplit) {
+  saveUiPreferences({ workspaceSplit: clampNumber(workspaceSplit, 38, 72) });
+}
+
+function loadAudioSourceMode() {
+  const mode = readUiPreferences().audioSourceMode;
+  return mode === AUDIO_SOURCE_MEETING ? AUDIO_SOURCE_MEETING : AUDIO_SOURCE_MICROPHONE;
+}
+
+function saveAudioSourceMode(audioSourceMode) {
+  saveUiPreferences({ audioSourceMode });
+}
+
+function readUiPreferences() {
   try {
-    localStorage.setItem(
-      UI_PREF_KEY,
-      JSON.stringify({ workspaceSplit: clampNumber(workspaceSplit, 38, 72) }),
-    );
+    return JSON.parse(localStorage.getItem(UI_PREF_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveUiPreferences(patch) {
+  try {
+    localStorage.setItem(UI_PREF_KEY, JSON.stringify({ ...readUiPreferences(), ...patch }));
   } catch {
     // UI preferences are optional and do not affect interview data.
   }
