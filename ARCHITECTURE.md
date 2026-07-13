@@ -86,6 +86,7 @@ server/config.js                 环境配置与部署约束
 server/security.js               HTTP/WebSocket 安全边界
 server/storage/                  SQLite repository 和迁移
 server/services/                 持久化业务任务
+server/services/resume-preview.js DOC/DOCX 本地文本预览
 server/providers/asr/            ASR adapters
 server/providers/llm/            LLM adapters
 mcp/server.mjs                   本地 stdio MCP 与工作台 REST 适配

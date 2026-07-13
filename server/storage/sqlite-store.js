@@ -468,6 +468,16 @@ export class SqliteStore {
     return row ? mapAttachment(row) : null;
   }
 
+  setAttachmentPreviewText(id, previewText) {
+    if (!this.getAttachment(id)) return null;
+    this.db.prepare("UPDATE attachments SET preview_text = ?, updated_at = ? WHERE id = ?").run(
+      cleanText(previewText, 500000),
+      new Date().toISOString(),
+      id,
+    );
+    return this.getAttachment(id);
+  }
+
   upsertJd(jd) {
     const now = new Date().toISOString();
     const value = {

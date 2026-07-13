@@ -19,6 +19,7 @@ import {
   Play,
   Plus,
   Radio,
+  RefreshCw,
   RotateCcw,
   Settings,
   Square,
@@ -109,6 +110,8 @@ function App() {
   const [selectedNoteId, setSelectedNoteId] = useState("");
   const [resumeZoom, setResumeZoom] = useState(1);
   const [resumeFocusMode, setResumeFocusMode] = useState(false);
+  const [resumePreviewError, setResumePreviewError] = useState("");
+  const [resumeReplacing, setResumeReplacing] = useState(false);
   const [notesView, setNotesView] = useState("hidden");
   const [workspaceSplit, setWorkspaceSplit] = useState(loadWorkspaceSplit);
   const [audioSourceMode, setAudioSourceMode] = useState(loadAudioSourceMode);
@@ -125,6 +128,7 @@ function App() {
   const partialTextRef = useRef(partialText);
   const runIdRef = useRef("");
   const resumeScrollerRef = useRef(null);
+  const resumeReplaceInputRef = useRef(null);
   const workspaceRef = useRef(null);
   const workspaceResizeRef = useRef(null);
   const captureAttemptRef = useRef("");
@@ -181,7 +185,41 @@ function App() {
     setCustomStatusDraft("");
     setResumeZoom(1);
     setResumeFocusMode(false);
+    setResumePreviewError("");
   }, [activeInterviewId]);
+
+  useEffect(() => {
+    if (!resumeFile || !isWordFile(resumeFile) || resumeFile.previewText || !resumeFile.id) {
+      setResumePreviewError("");
+      return undefined;
+    }
+
+    let cancelled = false;
+    setResumePreviewError("");
+    requestJson(`/api/attachments/${encodeURIComponent(resumeFile.id)}/preview-text`)
+      .then(({ previewText }) => {
+        if (cancelled) return;
+        setStore((current) => ({
+          ...current,
+          interviews: current.interviews.map((interview) =>
+            interview.resumeFile?.id === resumeFile.id
+              ? {
+                  ...interview,
+                  resumeFile: { ...interview.resumeFile, previewText },
+                }
+              : interview,
+          ),
+        }));
+      })
+      .catch((previewError) => {
+        if (!cancelled) {
+          setResumePreviewError(previewError.message || "Word 简历预览生成失败");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resumeFile?.id, resumeFile?.previewText]);
 
   useEffect(() => {
     function handleEscape(event) {
@@ -270,7 +308,7 @@ function App() {
     status === "idle" || status === "stopped" || status === "error";
   const canMarkResume = Boolean(
     resumeFile &&
-      (isPdfFile(resumeFile) || (isDocxFile(resumeFile) && resumeFile.previewText)),
+      (isPdfFile(resumeFile) || (isWordFile(resumeFile) && resumeFile.previewText)),
   );
   const pendingJobIds = useMemo(() => {
     return store.interviews.flatMap((interview) =>
@@ -450,6 +488,34 @@ function App() {
       patchInterviewForm({ resumeFile, resumeFileChanged: true });
     } catch (err) {
       setError(err.message || "读取简历文件失败");
+    }
+  }
+
+  async function handleActiveResumeReplacement(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !canSwitchInterview || !activeInterviewId) return;
+
+    setResumeReplacing(true);
+    setError("");
+    try {
+      const nextResumeFile = await serializeResumeFile(file);
+      await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}/resume`, {
+        method: "PUT",
+        body: JSON.stringify({ resumeFile: nextResumeFile }),
+      });
+      const remoteStore = await loadRemoteInterviewStore();
+      setStore({ ...remoteStore, activeInterviewId });
+      setMarkMode(false);
+      setNoteDraft(null);
+      setSelectedNoteId("");
+      setNotesView("hidden");
+      setResumePreviewError("");
+      setPersistError("");
+    } catch (replacementError) {
+      setError(replacementError.message || "更换简历失败");
+    } finally {
+      setResumeReplacing(false);
     }
   }
 
@@ -1566,6 +1632,23 @@ function App() {
       >
         <section className={`resume-pane pane ${resumeFocusMode ? "resume-focus-mode" : ""}`}>
           <PanelTitle icon={<FileText size={18} />} title="简历预览">
+            <input
+              accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              className="file-input"
+              onChange={handleActiveResumeReplacement}
+              ref={resumeReplaceInputRef}
+              type="file"
+            />
+            <button
+              className="resume-replace-action"
+              disabled={!canSwitchInterview || resumeReplacing}
+              onClick={() => resumeReplaceInputRef.current?.click()}
+              title={resumeFile ? "更换当前简历附件" : "添加简历附件"}
+              type="button"
+            >
+              <RefreshCw size={15} />
+              {resumeReplacing ? "处理中" : resumeFile ? "更换" : "添加"}
+            </button>
             <button
               className={`resume-mark-action ${markMode ? "active" : ""}`}
               disabled={!canMarkResume}
@@ -1651,6 +1734,7 @@ function App() {
                       onMark={handleResumeMark}
                       onSaveDraft={saveResumeNote}
                       selectedNoteId={selectedNoteId}
+                      previewError={resumePreviewError}
                       zoom={resumeZoom}
                     />
                   ) : (
@@ -2268,6 +2352,7 @@ function ResumeDocument({
   onFocusNote,
   onMark,
   onSaveDraft,
+  previewError,
   selectedNoteId,
   zoom,
 }) {
@@ -2287,15 +2372,25 @@ function ResumeDocument({
     return <PdfPreview file={file} markerProps={markerProps} zoom={zoom} />;
   }
 
-  if (isDocxFile(file) && file.previewText) {
+  if (isWordFile(file) && file.previewText) {
     return <DocxPreview file={file} markerProps={markerProps} zoom={zoom} />;
+  }
+
+  if (isWordFile(file) && !previewError) {
+    return (
+      <div className="resume-file-placeholder">
+        <FileText size={30} />
+        <p>{file.name}</p>
+        <span>正在生成 Word 预览...</span>
+      </div>
+    );
   }
 
   return (
     <div className="resume-file-placeholder">
       <FileText size={30} />
       <p>{file.name}</p>
-      <span>文件已保存到当前面试；当前格式先用下载查看。</span>
+      <span>{previewError || "文件已保存到当前面试；当前格式先用下载查看。"}</span>
       <a href={resumeFileSource(file)} download={file.name}>
         下载查看
       </a>
@@ -2923,6 +3018,14 @@ function isDocxFile(file) {
   return (
     file?.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
     file?.name?.toLowerCase().endsWith(".docx")
+  );
+}
+
+function isWordFile(file) {
+  return (
+    isDocxFile(file) ||
+    file?.type === "application/msword" ||
+    file?.name?.toLowerCase().endsWith(".doc")
   );
 }
 

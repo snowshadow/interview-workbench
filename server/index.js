@@ -12,6 +12,7 @@ import { SqliteStore } from "./storage/sqlite-store.js";
 import { OpenAiCompatibleLlmProvider } from "./providers/llm/openai-compatible.js";
 import { createAsrProvider } from "./providers/asr/index.js";
 import { AnalysisJobService } from "./services/analysis-job-service.js";
+import { extractWordPreviewText, isWordAttachment } from "./services/resume-preview.js";
 import {
   buildEffectiveProviderConfig,
   normalizeProviderSettingsPatch,
@@ -239,6 +240,7 @@ app.put("/api/interviews/:interviewId/resume", (req, res) => {
   try {
     const resumeFile = storeRepository.saveAttachment(req.params.interviewId, req.body?.resumeFile || req.body);
     if (!resumeFile) return res.status(404).json({ error: "面试场次不存在" });
+    storeRepository.patchInterview(req.params.interviewId, { resumeNotes: [] });
     res.json({ resumeFile });
   } catch (error) {
     res.status(400).json({ error: error.message || "保存简历失败" });
@@ -258,6 +260,30 @@ app.get("/api/attachments/:attachmentId", (req, res) => {
   res.type(attachment.type);
   res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(attachment.name)}`);
   res.sendFile(attachment.absolutePath);
+});
+
+app.get("/api/attachments/:attachmentId/preview-text", async (req, res) => {
+  const attachment = storeRepository.getAttachment(req.params.attachmentId);
+  if (!attachment || !fs.existsSync(attachment.absolutePath)) {
+    return res.status(404).json({ error: "附件不存在" });
+  }
+  if (!isWordAttachment(attachment)) {
+    return res.status(415).json({ error: "当前附件不是 Word 文档" });
+  }
+  if (attachment.previewText) return res.json({ previewText: attachment.previewText });
+
+  try {
+    const previewText = await extractWordPreviewText(attachment.absolutePath);
+    if (!previewText) return res.status(422).json({ error: "Word 文档中没有可预览的文字" });
+    storeRepository.setAttachmentPreviewText(attachment.id, previewText);
+    res.json({ previewText });
+  } catch (error) {
+    appendServerLog("resume.preview_failed", {
+      attachmentId: attachment.id,
+      error: serializeError(error),
+    });
+    res.status(422).json({ error: "Word 简历预览生成失败，请下载查看原文件" });
+  }
 });
 
 app.post("/api/backups", (_req, res) => {

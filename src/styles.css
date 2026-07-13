@@ -572,6 +572,21 @@ button.status-picker-trigger:hover:not(:disabled) {
   font-weight: 650;
 }
 
+.resume-pane .panel-title-actions .resume-replace-action {
+  min-height: 30px;
+  padding: 0 9px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.resume-pane .panel-title-actions .resume-replace-action:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
 .resume-pane .panel-title-actions .resume-mark-action:hover:not(:disabled) {
   border-color: #a9cbbb;
   background: #e4f1eb;
