@@ -40,7 +40,7 @@ class VolcengineAsrSession {
     this.log("session.created");
     if (!this.isConfigured()) {
       this.log("session.error", { message: "ASR credential missing" });
-      this.sendToClient({ type: "error", message: "火山 ASR 未配置，请检查 .env" });
+      this.sendToClient({ type: "error", message: "火山 ASR 未配置，请在工作台设置中完成配置" });
       this.client.close();
       return;
     }

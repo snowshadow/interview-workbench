@@ -420,10 +420,19 @@ button.status-picker-trigger:hover:not(:disabled) {
   background: #fff8ed;
   color: #774715;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.configuration-warning code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.configuration-warning button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  border-color: #d7aa6d;
+  background: #fffdf8;
+  color: #774715;
+  font-size: 13px;
 }
 
 .workspace {
@@ -652,6 +661,7 @@ button.status-picker-trigger:hover:not(:disabled) {
 
 .session-library-dialog,
 .interview-form-dialog,
+.provider-settings-dialog,
 .access-dialog {
   width: min(940px, 100%);
   max-height: min(760px, calc(100vh - 48px));
@@ -666,6 +676,10 @@ button.status-picker-trigger:hover:not(:disabled) {
 
 .interview-form-dialog {
   width: min(860px, 100%);
+}
+
+.provider-settings-dialog {
+  width: min(720px, 100%);
 }
 
 .access-dialog {
@@ -825,6 +839,101 @@ button.status-picker-trigger:hover:not(:disabled) {
   min-height: 0;
   overflow: auto;
   padding: 4px 20px 20px;
+}
+
+.provider-settings-body {
+  min-height: 240px;
+  overflow: auto;
+  padding: 4px 20px 20px;
+}
+
+.provider-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.provider-section-heading h3 {
+  margin-bottom: 3px;
+}
+
+.provider-section-heading p {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.provider-state {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.provider-state.ready {
+  border-color: #a5c8b8;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.provider-state.warn {
+  border-color: #dfbd88;
+  background: #fff8ed;
+  color: #8c551d;
+}
+
+.settings-model-grid {
+  margin-top: 12px;
+}
+
+.settings-details {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-details summary {
+  padding: 11px 0 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.settings-details-body {
+  display: grid;
+  gap: 12px;
+  padding-top: 9px;
+}
+
+.settings-details-body.form-grid-jd {
+  margin-bottom: 0;
+}
+
+.settings-clear-field {
+  margin-top: 9px !important;
+}
+
+.settings-error {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border: 1px solid #d99a91;
+  border-radius: 7px;
+  background: #fff2f0;
+  color: #8a2e26;
+  font-size: 13px;
+}
+
+.settings-loading {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 14px;
 }
 
 .form-section {
@@ -1496,7 +1605,8 @@ button.status-picker-trigger:hover:not(:disabled) {
   }
 
   .session-library-dialog,
-  .interview-form-dialog {
+  .interview-form-dialog,
+  .provider-settings-dialog {
     width: 100%;
     max-height: min(88vh, 760px);
     border-right: 0;
@@ -1539,6 +1649,15 @@ button.status-picker-trigger:hover:not(:disabled) {
 
   .interview-form-body {
     padding: 4px 14px 14px;
+  }
+
+  .provider-settings-body {
+    padding: 4px 14px 14px;
+  }
+
+  .configuration-warning {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .resume-upload-field {

@@ -12,6 +12,11 @@ import { SqliteStore } from "./storage/sqlite-store.js";
 import { OpenAiCompatibleLlmProvider } from "./providers/llm/openai-compatible.js";
 import { createAsrProvider } from "./providers/asr/index.js";
 import { AnalysisJobService } from "./services/analysis-job-service.js";
+import {
+  buildEffectiveProviderConfig,
+  normalizeProviderSettingsPatch,
+  publicProviderSettings,
+} from "./provider-settings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.umask(0o077);
@@ -19,6 +24,9 @@ const config = loadConfig();
 const logger = createLogger(config);
 const security = createSecurity(config);
 const storeRepository = new SqliteStore(config, logger);
+const baseProviderConfig = structuredClone({ asr: config.asr, llm: config.llm });
+let storedProviderSettings = storeRepository.getProviderSettings();
+applyEffectiveProviderConfig();
 const llmProvider = new OpenAiCompatibleLlmProvider(config.llm);
 const asrProvider = createAsrProvider(config.asr, logger);
 const analysisJobService = new AnalysisJobService({
@@ -40,9 +48,33 @@ app.use(express.json({ limit: "16mb" }));
 app.use("/api", security.httpMiddleware);
 
 app.get("/api/health", (_req, res) => {
+  res.json(currentHealth());
+});
+
+app.get("/api/provider-settings", (_req, res) => {
+  res.json({ settings: publicProviderSettings(config, storedProviderSettings) });
+});
+
+app.put("/api/provider-settings", (req, res) => {
+  try {
+    const nextSettings = normalizeProviderSettingsPatch(storedProviderSettings, req.body || {});
+    storedProviderSettings = storeRepository.setProviderSettings(nextSettings);
+    applyEffectiveProviderConfig();
+    const settings = publicProviderSettings(config, storedProviderSettings);
+    appendServerLog("provider_settings.updated", {
+      asrConfigured: settings.asr.configured,
+      llmConfigured: settings.llm.configured,
+    });
+    res.json({ settings, health: currentHealth() });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "保存服务配置失败" });
+  }
+});
+
+function currentHealth() {
   const asrConfigured = asrProvider.isConfigured();
   const llmConfigured = llmProvider.isConfigured();
-  res.json({
+  return {
     ok: true,
     asrConfigured,
     llmConfigured,
@@ -51,14 +83,20 @@ app.get("/api/health", (_req, res) => {
     asrProvider: config.asr.provider,
     asrResourceId: config.asr.resourceId,
     storage: "sqlite",
-    schemaVersion: 2,
+    schemaVersion: 3,
     accessMode: config.accessToken ? "token" : "local-only",
     issues: [
       ...(!asrConfigured ? ["ASR_NOT_CONFIGURED"] : []),
       ...(!llmConfigured ? ["LLM_NOT_CONFIGURED"] : []),
     ],
-  });
-});
+  };
+}
+
+function applyEffectiveProviderConfig() {
+  const effective = buildEffectiveProviderConfig(baseProviderConfig, storedProviderSettings);
+  Object.assign(config.asr, effective.asr);
+  Object.assign(config.llm, effective.llm);
+}
 
 app.get("/api/store", (_req, res) => {
   try {

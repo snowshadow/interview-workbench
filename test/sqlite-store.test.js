@@ -157,3 +157,22 @@ test("interview listing and transcript pagination avoid loading the full transcr
     cleanupTestConfig(config);
   }
 });
+
+test("provider settings persist locally but stay out of JSON exports", () => {
+  const config = createTestConfig();
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    store.setProviderSettings({
+      asr: { apiKey: "private-asr-key" },
+      llm: { apiKey: "private-llm-key" },
+    });
+    assert.equal(store.getProviderSettings().llm.apiKey, "private-llm-key");
+    const exported = JSON.stringify(store.exportStore());
+    assert.equal(exported.includes("private-asr-key"), false);
+    assert.equal(exported.includes("private-llm-key"), false);
+    assert.equal(fs.statSync(config.databaseFile).mode & 0o777, 0o600);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});

@@ -26,11 +26,10 @@
 
 ```bash
 npm ci
-cp .env.example .env
 npm run dev
 ```
 
-在 `.env` 中至少配置一组火山 ASR 凭证和一个 LLM API Key，然后打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，点击顶部**配置**，填写火山引擎和大模型 API Key。配置保存在本机并立即生效，不需要编辑文件或重启服务。
 
 生产式本机运行：
 
@@ -64,7 +63,15 @@ node scripts/install-skills.mjs codex
 
 ## 配置
 
-主要环境变量见 [.env.example](.env.example)：
+普通用户直接使用网页里的**配置**入口：
+
+- 火山引擎：填写新版 API Key；使用旧版控制台时也可以展开填写 App Key 和 Access Key
+- 大模型：填写 API Key；DeepSeek API 地址和默认模型已经预填
+- 高级参数默认折叠，通常不需要修改
+
+网页不会读取或显示已经保存的密钥。密钥保存在本机 SQLite 中，不会进入完整 JSON 导出；再次保存时留空即可保留原密钥。
+
+`.env` 只用于启动和高级部署。完整示例见 [.env.example](.env.example)：
 
 | 变量 | 用途 |
 | --- | --- |
@@ -72,10 +79,10 @@ node scripts/install-skills.mjs codex
 | `WORKBENCH_DATA_DIR` | SQLite、附件、备份和日志目录 |
 | `WORKBENCH_ACCESS_TOKEN` | 非本机监听时必填 |
 | `WORKBENCH_ALLOWED_ORIGINS` | 允许访问 API 和 WebSocket 的网页来源 |
-| `VOLCENGINE_ASR_*` | 火山引擎流式 ASR 配置 |
-| `LLM_*` 或 `DEEPSEEK_*` | OpenAI-compatible LLM 配置 |
+| `VOLCENGINE_ASR_*` | 可选，为网页配置提供火山引擎默认值 |
+| `LLM_*` 或 `DEEPSEEK_*` | 可选，为网页配置提供大模型默认值 |
 
-API Key 只保存在服务端环境中。远程模式下，网页要求输入连接口令，口令仅保存在当前浏览器会话。
+环境变量仍适合自动化部署。网页中保存的 provider 配置优先于对应环境变量；删除网页保存值后会回退到环境变量。远程模式下，网页要求输入连接口令，口令仅保存在当前浏览器会话。
 
 ## 数据与备份
 
@@ -91,7 +98,7 @@ data/
 
 升级旧版本时，服务会把 `data/interview-store.json` 自动迁移到 SQLite，先创建时间戳备份，并保留原文件。右上角菜单可以导出或导入包含简历附件的完整 JSON 备份。导入前，服务还会自动创建一份 SQLite 快照。
 
-筛选报告、面试准备和面试总结保存在 SQLite 的场次产物中；AI 编程助手的会话 ID 也按场次记录。相同类型的产物再次保存时会覆盖当前版本，完整备份会一起包含这些数据。
+筛选报告、面试准备和面试总结保存在 SQLite 的场次产物中；AI 编程助手的会话 ID 也按场次记录。相同类型的产物再次保存时会覆盖当前版本，完整备份会一起包含这些数据。网页保存的服务密钥不会进入 JSON 导出，但 SQLite 快照会包含本机配置。
 
 `data/`、`.env`、日志和本地招聘材料已从 Git 与打包产物中排除。发布前仍应运行 `npm run release:check`。
 

@@ -157,8 +157,13 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS harness_sessions_interview
         ON harness_sessions(interview_id, harness, is_primary DESC);
+      CREATE TABLE IF NOT EXISTS provider_settings (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        settings_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
-    this.setMeta("schema_version", "2");
+    this.setMeta("schema_version", "3");
     DEFAULT_STATUSES.forEach((status, index) => this.addStatus(status, index));
   }
 
@@ -193,7 +198,7 @@ export class SqliteStore {
       .map((row) => this.hydrateInterview(row));
     const active = this.getMeta("active_interview_id");
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       activeInterviewId: interviews.some((item) => item.id === active)
         ? active
         : interviews[0]?.id || "",
@@ -595,6 +600,22 @@ export class SqliteStore {
       .prepare("SELECT * FROM harness_sessions WHERE interview_id = ? ORDER BY is_primary DESC, updated_at DESC")
       .all(interviewId)
       .map(mapHarnessSession);
+  }
+
+  getProviderSettings() {
+    const row = this.db.prepare("SELECT settings_json FROM provider_settings WHERE id = 1").get();
+    return row ? parseJson(row.settings_json, {}) : {};
+  }
+
+  setProviderSettings(settings) {
+    const value = isObject(settings) ? settings : {};
+    this.db.prepare(`
+      INSERT INTO provider_settings (id, settings_json, updated_at)
+      VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET settings_json=excluded.settings_json, updated_at=excluded.updated_at
+    `).run(JSON.stringify(value), new Date().toISOString());
+    trySetPrivateMode(this.config.databaseFile);
+    return this.getProviderSettings();
   }
 
   createAnalysisJob({ interviewId, card, payload, idempotencyKey, maxAttempts = 3 }) {

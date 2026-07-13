@@ -35,8 +35,11 @@ AI 编程助手 (Codex / Claude Code / WorkBuddy)
 - `jd_library` / `status_options`：可复用 JD 和自定义状态
 - `interview_artifacts`：筛选、准备、总结等可回写 Markdown 产物
 - `harness_sessions`：场次与 Codex、Claude Code、WorkBuddy 等会话的关联
+- `provider_settings`：网页保存的 ASR、LLM 配置；密钥不进入 JSON 导出
 
 SQLite 启用 WAL、外键和 busy timeout。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
+
+Provider 配置按“网页保存值优先、环境变量回退”的顺序合并。保存后直接更新 provider 共享配置对象，新建 ASR 会话和后续 LLM 任务立即使用新值，不需要重启服务。监听地址、端口、数据目录、访问令牌等启动参数仍只由环境变量控制。
 
 ## 分析状态机
 
