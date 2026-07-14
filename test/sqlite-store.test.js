@@ -92,6 +92,28 @@ test("deleted interview attachments are no longer addressable", () => {
   }
 });
 
+test("new interviews do not replace the active interview unless explicitly requested", () => {
+  const config = createTestConfig();
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    const scheduledInterview = (id, name, activate = false) =>
+      sampleInterview({ id, name, activate, lines: [], cards: [], askedQuestions: [] });
+    store.createInterview(scheduledInterview("first", "第一场"));
+    store.createInterview(scheduledInterview("second", "第二场"));
+    assert.equal(store.getStore().activeInterviewId, "first");
+
+    store.setActiveInterview("second");
+    assert.equal(store.getStore().activeInterviewId, "second");
+
+    store.createInterview(scheduledInterview("third", "第三场", true));
+    assert.equal(store.getStore().activeInterviewId, "third");
+    assert.equal(store.setActiveInterview("missing"), null);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
 test("interview artifacts and harness sessions persist and survive export", () => {
   const sourceConfig = createTestConfig("interview-artifacts-source-");
   const targetConfig = createTestConfig("interview-artifacts-target-");

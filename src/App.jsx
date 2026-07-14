@@ -260,7 +260,9 @@ function App() {
       if (!["idle", "stopped", "error"].includes(statusRef.current)) return;
       loadRemoteInterviewStore()
         .then((remoteStore) => {
-          if (remoteStore) setStore(remoteStore);
+          if (remoteStore) {
+            setStore((current) => preserveActiveInterview(remoteStore, current.activeInterviewId));
+          }
         })
         .catch(() => {});
     }
@@ -437,6 +439,11 @@ function App() {
     setSessionLibraryOpen(false);
     setSessionMenuOpen(false);
     setStore((prev) => ({ ...prev, activeInterviewId: interviewId }));
+    requestJson(`/api/interviews/${encodeURIComponent(interviewId)}/active`, {
+      method: "PUT",
+    })
+      .then(() => setPersistError(""))
+      .catch(() => setPersistError("当前场次保存失败"));
   }
 
   function openInterviewForm(mode) {
@@ -571,7 +578,7 @@ function App() {
       if (interviewForm.mode === "create") {
         const data = await requestJson("/api/interviews", {
           method: "POST",
-          body: JSON.stringify({ ...patch, resumeFile: interviewForm.resumeFile }),
+          body: JSON.stringify({ ...patch, resumeFile: interviewForm.resumeFile, activate: true }),
         });
         nextActiveId = data.interview.id;
       } else {
@@ -2787,6 +2794,13 @@ function normalizeStore(store) {
       : [],
     statusOptions: mergeStatusOptions(store?.statusOptions, nextInterviews),
   };
+}
+
+function preserveActiveInterview(remoteStore, preferredInterviewId) {
+  const normalized = normalizeStore(remoteStore);
+  return normalized.interviews.some((interview) => interview.id === preferredInterviewId)
+    ? { ...normalized, activeInterviewId: preferredInterviewId }
+    : normalized;
 }
 
 function mergeInterviewStores(localStore, remoteStore) {

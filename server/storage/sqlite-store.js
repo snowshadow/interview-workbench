@@ -254,11 +254,20 @@ export class SqliteStore {
       artifacts: Array.isArray(payload.artifacts) ? payload.artifacts : [],
       harnessSessions: Array.isArray(payload.harnessSessions) ? payload.harnessSessions : [],
     };
+    const currentActiveId = this.getMeta("active_interview_id");
+    const shouldActivate = payload.activate === true || !this.getInterview(currentActiveId);
     this.transaction(() => {
       this.upsertInterviewSnapshot(interview);
-      this.setMeta("active_interview_id", interview.id);
+      if (shouldActivate) this.setMeta("active_interview_id", interview.id);
     });
     return this.getInterview(interview.id);
+  }
+
+  setActiveInterview(id) {
+    const interview = this.getInterview(id);
+    if (!interview) return null;
+    this.setMeta("active_interview_id", interview.id);
+    return interview;
   }
 
   getInterview(id) {

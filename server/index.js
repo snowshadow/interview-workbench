@@ -154,6 +154,12 @@ app.get("/api/interviews/:interviewId", (req, res) => {
   res.json({ interview });
 });
 
+app.put("/api/interviews/:interviewId/active", (req, res) => {
+  const interview = storeRepository.setActiveInterview(req.params.interviewId);
+  if (!interview) return res.status(404).json({ error: "面试场次不存在" });
+  res.json({ activeInterviewId: interview.id });
+});
+
 app.get("/api/interviews/:interviewId/context", (req, res) => {
   const interview = storeRepository.getInterviewContext(req.params.interviewId);
   if (!interview) return res.status(404).json({ error: "面试场次不存在" });
