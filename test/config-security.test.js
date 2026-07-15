@@ -34,19 +34,23 @@ test("HTTP and WebSocket requests enforce origin and bearer token", () => {
   });
   assert.equal(rejected.statusCode, 403);
 
+  // Query-string tokens are no longer accepted: they leak into proxy logs.
   assert.equal(
     security.validateUpgrade({
       url: "/ws/asr?token=secret",
       headers: { origin: "http://127.0.0.1:5173" },
     }),
-    true,
+    false,
   );
   assert.equal(
     security.validateUpgrade({
-      url: "/ws/asr?token=wrong",
-      headers: { origin: "http://127.0.0.1:5173" },
+      url: "/ws/asr",
+      headers: {
+        origin: "http://127.0.0.1:5173",
+        authorization: "Bearer secret",
+      },
     }),
-    false,
+    true,
   );
   const encoded = Buffer.from("secret").toString("base64url");
   assert.equal(

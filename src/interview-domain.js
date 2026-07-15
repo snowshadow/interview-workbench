@@ -1,5 +1,8 @@
 export function inferInterviewStatus(interview) {
-  return interview?.lines?.length || interview?.cards?.length || interview?.sessionStartedAt
+  return interview?.lines?.length ||
+    interview?.transcriptLineCount ||
+    interview?.cards?.length ||
+    interview?.sessionStartedAt
     ? "已面待定"
     : "未面";
 }

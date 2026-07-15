@@ -98,6 +98,8 @@ function App() {
   const [sessionLibraryOpen, setSessionLibraryOpen] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [interviewForm, setInterviewForm] = useState(null);
+  const [interviewFormSubmitting, setInterviewFormSubmitting] = useState(false);
+  const interviewFormSubmitLockRef = useRef(false);
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
   const [providerSettingsDraft, setProviderSettingsDraft] = useState(null);
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
@@ -261,7 +263,12 @@ function App() {
       loadRemoteInterviewStore()
         .then((remoteStore) => {
           if (remoteStore) {
-            setStore((current) => preserveActiveInterview(remoteStore, current.activeInterviewId));
+            setStore((current) =>
+              withLocalTranscripts(
+                preserveActiveInterview(remoteStore, current.activeInterviewId),
+                current,
+              ),
+            );
           }
         })
         .catch(() => {});
@@ -444,6 +451,25 @@ function App() {
     })
       .then(() => setPersistError(""))
       .catch(() => setPersistError("当前场次保存失败"));
+    hydrateInterviewTranscript(interviewId);
+  }
+
+  function hydrateInterviewTranscript(interviewId) {
+    const target = store.interviews.find((interview) => interview.id === interviewId);
+    if (!target || target.lines.length || !target.transcriptLineCount) return;
+    requestJson(`/api/interviews/${encodeURIComponent(interviewId)}`)
+      .then(({ interview }) => {
+        if (!Array.isArray(interview?.lines)) return;
+        setStore((prev) => ({
+          ...prev,
+          interviews: prev.interviews.map((item) =>
+            item.id === interviewId && !item.lines.length
+              ? { ...item, lines: interview.lines }
+              : item,
+          ),
+        }));
+      })
+      .catch(() => setPersistError("转录读取失败，请重新打开该场次"));
   }
 
   function openInterviewForm(mode) {
@@ -512,7 +538,11 @@ function App() {
         body: JSON.stringify({ resumeFile: nextResumeFile }),
       });
       const remoteStore = await loadRemoteInterviewStore();
-      setStore({ ...remoteStore, activeInterviewId });
+      if (remoteStore) {
+        setStore((current) =>
+          withLocalTranscripts({ ...remoteStore, activeInterviewId }, current),
+        );
+      }
       setMarkMode(false);
       setNoteDraft(null);
       setSelectedNoteId("");
@@ -528,6 +558,7 @@ function App() {
 
   async function submitInterviewForm() {
     if (!interviewForm || !canSwitchInterview) return;
+    if (interviewFormSubmitLockRef.current) return;
     const name = interviewForm.name.trim();
     if (!name) {
       setError("请填写候选人姓名");
@@ -546,6 +577,8 @@ function App() {
       "";
     let nextJdId = interviewForm.selectedJdId || "";
     setError("");
+    interviewFormSubmitLockRef.current = true;
+    setInterviewFormSubmitting(true);
     try {
       if (interviewForm.saveJdToLibrary && roleMarkdownValue) {
         const existing = nextJdId
@@ -601,12 +634,19 @@ function App() {
       }
 
       const remoteStore = await loadRemoteInterviewStore();
-      setStore({ ...remoteStore, activeInterviewId: nextActiveId });
+      if (remoteStore) {
+        setStore((current) =>
+          withLocalTranscripts({ ...remoteStore, activeInterviewId: nextActiveId }, current),
+        );
+      }
       setPartialText("");
       setInterviewForm(null);
       setPersistError("");
     } catch (err) {
       setError(err.message || "保存面试失败");
+    } finally {
+      interviewFormSubmitLockRef.current = false;
+      setInterviewFormSubmitting(false);
     }
   }
 
@@ -629,7 +669,9 @@ function App() {
         });
       }
       const remoteStore = await loadRemoteInterviewStore();
-      setStore(remoteStore);
+      if (remoteStore) {
+        setStore((current) => withLocalTranscripts(remoteStore, current));
+      }
     } catch (err) {
       setError(err.message || "删除面试失败");
     }
@@ -815,8 +857,12 @@ function App() {
           stopLocalAudio();
         }
       };
-      socket.onmessage = (event) => handleServerMessage(event.data);
+      socket.onmessage = (event) => {
+        if (wsRef.current !== socket) return;
+        handleServerMessage(event.data);
+      };
       socket.onerror = () => {
+        if (wsRef.current !== socket) return;
         commitPartialTranscript();
         setError("转录连接出错");
         setStatus("error");
@@ -824,9 +870,11 @@ function App() {
         stopLocalAudio();
       };
       socket.onclose = () => {
+        if (wsRef.current !== socket) return;
         if (statusRef.current !== "stopped") {
           commitPartialTranscript();
           setStatus("stopped");
+          setError("转录连接已断开，请重新开始面试");
         }
         stopLocalAudio();
       };
@@ -971,9 +1019,15 @@ function App() {
           ? "已面待定"
           : interview.interviewStatus || inferInterviewStatus(interview),
     }));
-    wsRef.current?.send(JSON.stringify({ type: "stop" }));
-    wsRef.current?.close();
-    stopLocalAudio();
+    const socket = wsRef.current;
+    try {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "stop" }));
+      }
+    } finally {
+      socket?.close();
+      stopLocalAudio();
+    }
   }
 
   function stopLocalAudio() {
@@ -1613,6 +1667,7 @@ function App() {
           onSelectJd={selectFormJd}
           onSubmit={submitInterviewForm}
           statusOptions={statusOptions}
+          submitting={interviewFormSubmitting}
         />
       ) : null}
 
@@ -1954,6 +2009,7 @@ function InterviewFormDialog({
   onSelectJd,
   onSubmit,
   statusOptions,
+  submitting = false,
 }) {
   const isCreate = form.mode === "create";
 
@@ -2115,8 +2171,8 @@ function InterviewFormDialog({
           <button type="button" onClick={onClose}>
             取消
           </button>
-          <button className="primary" type="submit">
-            {isCreate ? "创建场次" : "保存修改"}
+          <button className="primary" type="submit" disabled={submitting}>
+            {submitting ? "保存中..." : isCreate ? "创建场次" : "保存修改"}
           </button>
         </div>
       </form>
@@ -2769,7 +2825,6 @@ function interviewMetadataPatch(interview) {
     resumeNotes: interview.resumeNotes,
     selectedJdId: interview.selectedJdId,
     jdDraftName: interview.jdDraftName,
-    lastProcessedLineCount: interview.lastProcessedLineCount,
     speakerLabels: interview.speakerLabels,
     askedQuestions: interview.askedQuestions,
   };
@@ -2801,6 +2856,23 @@ function preserveActiveInterview(remoteStore, preferredInterviewId) {
   return normalized.interviews.some((interview) => interview.id === preferredInterviewId)
     ? { ...normalized, activeInterviewId: preferredInterviewId }
     : normalized;
+}
+
+// getStore 只内联活跃场次的转录；远端未带 lines 的场次保留本地已加载的转录，
+// 避免焦点刷新把界面上的转录清空。
+function withLocalTranscripts(nextStore, currentStore) {
+  if (!nextStore) return nextStore;
+  const localById = new Map(
+    (currentStore?.interviews || []).map((interview) => [interview.id, interview]),
+  );
+  return {
+    ...nextStore,
+    interviews: nextStore.interviews.map((interview) => {
+      if (interview.lines.length) return interview;
+      const local = localById.get(interview.id);
+      return local?.lines?.length ? { ...interview, lines: local.lines } : interview;
+    }),
+  };
 }
 
 function mergeInterviewStores(localStore, remoteStore) {
@@ -2897,6 +2969,11 @@ function normalizeInterview(interview) {
     interviewStatus:
       normalizeStatusLabel(interview?.interviewStatus) || inferInterviewStatus(merged),
     lines: Array.isArray(interview?.lines) ? interview.lines : [],
+    transcriptLineCount: Number.isFinite(Number(interview?.transcriptLineCount))
+      ? Number(interview.transcriptLineCount)
+      : Array.isArray(interview?.lines)
+        ? interview.lines.length
+        : 0,
     cards: Array.isArray(interview?.cards) ? interview.cards : [],
     askedQuestions: Array.isArray(interview?.askedQuestions)
       ? interview.askedQuestions

@@ -191,17 +191,24 @@ export class SqliteStore {
     });
   }
 
-  getStore() {
-    const interviews = this.db
+  getStore({ includeAllLines = false } = {}) {
+    const rows = this.db
       .prepare("SELECT * FROM interviews WHERE deleted_at IS NULL ORDER BY updated_at DESC")
-      .all()
-      .map((row) => this.hydrateInterview(row));
+      .all();
     const active = this.getMeta("active_interview_id");
+    const activeInterviewId = rows.some((row) => row.id === active)
+      ? active
+      : rows[0]?.id || "";
+    // Only the active interview ships its transcript inline; other interviews
+    // expose transcriptLineCount and are paged via getTranscriptChunk.
+    const interviews = rows.map((row) =>
+      this.hydrateInterview(row, {
+        includeLines: includeAllLines || row.id === activeInterviewId,
+      }),
+    );
     return {
       schemaVersion: 3,
-      activeInterviewId: interviews.some((item) => item.id === active)
-        ? active
-        : interviews[0]?.id || "",
+      activeInterviewId,
       interviews,
       jdLibrary: this.db
         .prepare("SELECT * FROM jd_library ORDER BY updated_at DESC")
@@ -365,6 +372,12 @@ export class SqliteStore {
       ]),
       updatedAt: new Date().toISOString(),
     };
+    // The analysis cursor only moves forward; job completion owns advancing it,
+    // so a stale client patch must never rewind already-analyzed segments.
+    merged.lastProcessedLineCount = Math.max(
+      Number(current.lastProcessedLineCount || 0),
+      Number(merged.lastProcessedLineCount || 0),
+    );
     this.transaction(() => {
       this.upsertInterviewRow(merged);
       if (Array.isArray(patch.askedQuestions)) this.replaceQuestions(id, patch.askedQuestions);
@@ -427,9 +440,11 @@ export class SqliteStore {
     const type = cleanText(file.type, 160) || "application/octet-stream";
     const name = cleanText(file.name, 300) || "resume";
     if (!isAllowedResume(name, type)) throw new Error("Only PDF, DOC, and DOCX resumes are supported");
+    const format = sniffResumeFormat(data);
+    if (!format) throw new Error("Resume content is not a valid PDF, DOC, or DOCX file");
     const existing = this.db.prepare("SELECT * FROM attachments WHERE interview_id = ?").get(interviewId);
     const id = existing?.id || crypto.randomUUID();
-    const extension = safeExtension(name, type);
+    const extension = format.extension;
     const relativePath = path.join("attachments", `${id}${extension}`);
     const absolutePath = path.join(this.config.dataDir, relativePath);
     fs.writeFileSync(absolutePath, data, { mode: 0o600 });
@@ -445,7 +460,7 @@ export class SqliteStore {
       id,
       interviewId,
       name,
-      type,
+      format.type,
       data.length,
       relativePath,
       cleanText(file.previewText, 500000),
@@ -747,7 +762,7 @@ export class SqliteStore {
   }
 
   exportStore() {
-    const store = this.getStore();
+    const store = this.getStore({ includeAllLines: true });
     return {
       ...store,
       exportedAt: new Date().toISOString(),
@@ -794,6 +809,11 @@ export class SqliteStore {
         .all(row.id)
         .map(mapLine)
       : undefined;
+    const transcriptLineCount = includeLines
+      ? lines.length
+      : this.db
+        .prepare("SELECT COUNT(*) AS count FROM transcript_lines WHERE interview_id = ?")
+        .get(row.id).count;
     const cards = this.db
       .prepare("SELECT * FROM analysis_cards WHERE interview_id = ? ORDER BY position")
       .all(row.id)
@@ -817,6 +837,7 @@ export class SqliteStore {
       selectedJdId: row.selected_jd_id,
       jdDraftName: row.jd_draft_name,
       ...(includeLines ? { lines } : {}),
+      transcriptLineCount,
       cards,
       askedQuestions,
       lastProcessedLineCount: row.last_processed_line_count,
@@ -830,7 +851,17 @@ export class SqliteStore {
     const normalized = normalizeInterview(interview);
     this.upsertInterviewRow(normalized);
     this.addStatus(normalized.interviewStatus);
-    if (interview.resumeFile?.dataUrl) this.saveAttachment(normalized.id, interview.resumeFile);
+    if (interview.resumeFile?.dataUrl) {
+      try {
+        this.saveAttachment(normalized.id, interview.resumeFile);
+      } catch (error) {
+        // A corrupt attachment in an imported backup must not abort the whole import.
+        this.logger?.warn?.("store.import_attachment_skipped", {
+          interviewId: normalized.id,
+          error: { message: error.message },
+        });
+      }
+    }
     this.replaceLines(normalized.id, normalized.lines);
     this.replaceCards(normalized.id, normalized.cards);
     this.replaceQuestions(normalized.id, normalized.askedQuestions);
@@ -1116,12 +1147,25 @@ function isAllowedResume(name, type) {
   ].includes(type);
 }
 
-function safeExtension(name, type) {
-  const extension = path.extname(name).toLowerCase();
-  if ([".pdf", ".doc", ".docx"].includes(extension)) return extension;
-  if (type === "application/pdf") return ".pdf";
-  if (type === "application/msword") return ".doc";
-  return ".docx";
+const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const OLE_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+
+function sniffResumeFormat(data) {
+  if (data.length < 8) return null;
+  if (data.subarray(0, 4).toString("latin1") === "%PDF") {
+    return { extension: ".pdf", type: "application/pdf" };
+  }
+  if (data[0] === 0x50 && data[1] === 0x4b && data[2] === 0x03 && data[3] === 0x04) {
+    return { extension: ".docx", type: DOCX_TYPE };
+  }
+  if (OLE_MAGIC.every((byte, index) => data[index] === byte)) {
+    return { extension: ".doc", type: "application/msword" };
+  }
+  // Many legacy “.doc” resumes are RTF; word-extractor can preview them.
+  if (data.subarray(0, 5).toString("latin1") === "{\\rtf") {
+    return { extension: ".doc", type: "application/msword" };
+  }
+  return null;
 }
 
 function cleanText(value, maxLength) {

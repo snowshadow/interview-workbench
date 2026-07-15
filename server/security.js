@@ -25,11 +25,9 @@ export function createSecurity(config) {
     const origin = request.headers.origin;
     if (origin && !config.allowedOrigins.has(origin)) return false;
     if (!config.accessToken) return true;
-    const url = new URL(request.url || "/", "http://localhost");
-    const queryToken = url.searchParams.get("token") || "";
     const bearer = String(request.headers.authorization || "").replace(/^Bearer\s+/i, "");
     const protocolToken = readProtocolToken(request.headers["sec-websocket-protocol"]);
-    return safeEqual(queryToken || bearer || protocolToken, config.accessToken);
+    return safeEqual(bearer || protocolToken, config.accessToken);
   }
 
   return { httpMiddleware, responseHeaders, validateUpgrade };
@@ -42,7 +40,7 @@ function setSecurityHeaders(res) {
   res.setHeader("Permissions-Policy", "microphone=(self), camera=(), geolocation=()");
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:",
+    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:",
   );
 }
 

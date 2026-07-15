@@ -119,6 +119,11 @@ export class AnalysisJobService {
 
   async run(job) {
     if (this.stopped) return null;
+    if (job.attempts >= job.maxAttempts) {
+      this.store.updateJob(job.id, { status: "error", error: "分析重试次数已用完" });
+      this.logger.warn("job.attempts_exhausted", { jobId: job.id, attempts: job.attempts });
+      return null;
+    }
     const controller = new AbortController();
     this.running.set(job.id, controller);
     const attempt = job.attempts + 1;

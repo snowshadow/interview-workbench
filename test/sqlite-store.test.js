@@ -81,7 +81,7 @@ test("deleted interview attachments are no longer addressable", () => {
     const resume = store.saveAttachment("candidate-1", {
       name: "resume.pdf",
       type: "application/pdf",
-      dataUrl: `data:application/pdf;base64,${Buffer.from("pdf").toString("base64")}`,
+      dataUrl: `data:application/pdf;base64,${Buffer.from("%PDF-1.4\ndeleted").toString("base64")}`,
     });
     assert.ok(store.getAttachment(resume.id));
     store.softDeleteInterview("candidate-1");
@@ -193,6 +193,55 @@ test("provider settings persist locally but stay out of JSON exports", () => {
     assert.equal(exported.includes("private-asr-key"), false);
     assert.equal(exported.includes("private-llm-key"), false);
     assert.equal(fs.statSync(config.databaseFile).mode & 0o777, 0o600);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("getStore inlines transcript only for the active interview", () => {
+  const config = createTestConfig();
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    store.createInterview(sampleInterview({ id: "candidate-1", activate: true }));
+    store.createInterview(sampleInterview({
+      id: "candidate-2",
+      name: "另一位候选人",
+      lines: [
+        { id: "line-3", text: "请介绍团队规模", speaker: "1" },
+        { id: "line-4", text: "十人平台组", speaker: "2" },
+      ],
+    }));
+
+    const slim = store.getStore();
+    assert.equal(slim.activeInterviewId, "candidate-1");
+    const active = slim.interviews.find((item) => item.id === "candidate-1");
+    const inactive = slim.interviews.find((item) => item.id === "candidate-2");
+    assert.equal(active.lines.length, 2);
+    assert.equal(active.transcriptLineCount, 2);
+    assert.equal(inactive.lines, undefined);
+    assert.equal(inactive.transcriptLineCount, 2);
+
+    const exported = store.exportStore();
+    for (const interview of exported.interviews) {
+      assert.equal(interview.lines.length, 2);
+    }
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("patchInterview never rewinds the analysis cursor", () => {
+  const config = createTestConfig();
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    store.createInterview(sampleInterview({ id: "candidate-1", lastProcessedLineCount: 5 }));
+    const rewound = store.patchInterview("candidate-1", { lastProcessedLineCount: 2, name: "改名" });
+    assert.equal(rewound.lastProcessedLineCount, 5);
+    assert.equal(rewound.name, "改名");
+    const advanced = store.patchInterview("candidate-1", { lastProcessedLineCount: 9 });
+    assert.equal(advanced.lastProcessedLineCount, 9);
   } finally {
     store.close();
     cleanupTestConfig(config);
