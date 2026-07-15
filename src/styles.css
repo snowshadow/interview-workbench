@@ -1334,6 +1334,14 @@ button.status-picker-trigger:hover:not(:disabled) {
   transform: translate(-50%, -50%) scale(1.12);
 }
 
+/* 视觉 28px 的小圆点击判定太苛刻，扩大到 44px 命中区 */
+.resume-note-marker::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+}
+
 .note-popover {
   position: absolute;
   width: min(240px, 72%);
