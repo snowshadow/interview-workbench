@@ -38,7 +38,9 @@ AI 编程助手 (Codex / Claude Code / WorkBuddy)
 - `harness_sessions`：场次与 Codex、Claude Code、WorkBuddy 等会话的关联
 - `provider_settings`：网页保存的 ASR、LLM 配置；密钥不进入 JSON 导出
 
-SQLite 启用 WAL、外键和 busy timeout。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
+SQLite 启用 WAL、外键和 busy timeout；事务通过 SAVEPOINT 支持可重入嵌套。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
+
+`GET /api/store` 只内联活跃场次的转录，其余场次暴露 `transcriptLineCount`，切换场次时按需加载；导出和备份始终包含全部转录。分析游标 `last_processed_line_count` 只允许前进，客户端补丁不能回退它。附件按魔数校验内容（PDF/DOCX/DOC/RTF），扩展名和 MIME 以内容为准。
 
 Provider 配置按“网页保存值优先、环境变量回退”的顺序合并。保存后直接更新 provider 共享配置对象，新建 ASR 会话和后续 LLM 任务立即使用新值，不需要重启服务。监听地址、端口、数据目录、访问令牌等启动参数仍只由环境变量控制。
 
@@ -55,13 +57,13 @@ queued -> running -> done
 
 ## Provider 边界
 
-ASR provider 负责凭证判断、上游连接、协议编解码、重连和标准化转录结果。核心服务只创建会话。
+ASR provider 负责凭证判断、上游连接、协议编解码、重连和标准化转录结果。核心服务只创建会话。音频帧不做逐帧压缩：PCM 几乎不可压缩，协议头按消息声明压缩方式。浏览器到服务端的转录 WebSocket 断开后会自动重连（指数退避、最多 5 次），期间不释放麦克风和音频管线，`runId` 保持不变以保证转录去重。
 
 浏览器会议声音模式使用 Screen Capture API 请求用户选择窗口或屏幕，只提取音频轨，与麦克风在 Web Audio 中混为单声道 PCM。共享视频轨仅用于维持浏览器授权，不读取、不上传、不保存；停止面试或连接异常时会同时释放麦克风和共享流。
 
-LLM provider 负责构造受限提示词、网络超时、响应解析和 Markdown 白名单清洗。简历、JD 和转录均按不可信资料处理，不能改变系统指令或输出格式。
+LLM provider 是纯传输层，只负责网络超时、响应大小限制和响应解析（`chatComplete`）。受限提示词构造和 Markdown 白名单清洗属于业务逻辑，位于 `server/services/interview-analysis.js`。简历、JD 和转录均按不可信资料处理，不能改变系统指令或输出格式。
 
-新增 provider 时应实现同等接口并增加协议、错误分类和数据边界测试，不应把供应商逻辑放回 `server/index.js`。
+ASR 和 LLM 都通过工厂创建（`createAsrProvider` / `createLlmProvider`）。新增 provider 时应实现同等接口并增加协议、错误分类和数据边界测试，不应把供应商逻辑放回 `server/index.js`。
 
 ## 安全边界
 
@@ -93,9 +95,12 @@ mcp/server.mjs                   本地 stdio MCP 与工作台 REST 适配
 skills/                           跨 Harness 的通用 Agent Skills
 src/api.js                       浏览器 API、认证和 WebSocket 接入
 src/interview-domain.js          场次状态、排序和日期等纯领域函数
-src/components/                  场次库和通用工作台组件
+src/lib/                         纯函数：store 规整、转录合并、音频重采样、简历文件
+src/components/                  场次库、转录面板、卡片列表和通用工作台组件
+src/components/dialogs/          场次表单和 Provider 设置对话框
+src/components/resume/           PDF/DOCX 预览与简历标注层
 src/App.jsx                      主工作流状态与交互编排
 test/                            存储、任务、安全和 provider 测试
 ```
 
-前端已拆出 API、场次领域逻辑、场次库和通用组件。下一阶段可以继续按 `resume-pane`、`assistant-pane`、`transcript-pane` 和对应 hooks 拆分，但不应在拆分时改变持久化协议。
+前端已拆出 API、领域逻辑、纯函数库、对话框、简历预览和转录/卡片面板。实时识别中的临时文本通过订阅桥接直达转录面板，高频 ASR 帧不会触发整页重渲染；转录行和分析卡片均为 memo 组件。下一阶段可以继续抽 hooks（useInterviewStore / useAsrSession / useAnalysisJobs），但不应在拆分时改变持久化协议。
