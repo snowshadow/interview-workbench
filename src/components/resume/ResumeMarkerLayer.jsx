@@ -1,26 +1,40 @@
 import { StickyNote } from "lucide-react";
 
+function belongsToLayer(note, coordinateMode, pageNumber) {
+  const noteMode = note?.coordinateMode || "content";
+  if (noteMode !== coordinateMode) return false;
+  return coordinateMode !== "page" || Number(note.pageNumber) === Number(pageNumber);
+}
+
+function popoverPosition(anchor) {
+  return {
+    left: `clamp(128px, ${anchor.x * 100}%, calc(100% - 128px))`,
+    top: `clamp(8px, ${anchor.y * 100}%, calc(100% - 126px))`,
+  };
+}
+
 export function ResumeMarkerLayer({
   coordinateMode,
   markMode,
   noteDraft,
+  noteEditor,
   notes,
   onCancelDraft,
+  onCloseEditor,
+  onDeleteNote,
   onDraftChange,
+  onEditorChange,
   onFocusNote,
   onMark,
   onSaveDraft,
+  onSaveEditor,
   pageNumber = null,
   selectedNoteId,
 }) {
-  const layerNotes = notes.filter((note) => {
-    const noteMode = note.coordinateMode || "content";
-    if (noteMode !== coordinateMode) return false;
-    return coordinateMode !== "page" || Number(note.pageNumber) === Number(pageNumber);
-  });
-  const draftVisible =
-    noteDraft?.coordinateMode === coordinateMode &&
-    (coordinateMode !== "page" || Number(noteDraft.pageNumber) === Number(pageNumber));
+  const layerNotes = notes.filter((note) => belongsToLayer(note, coordinateMode, pageNumber));
+  const draftVisible = noteDraft ? belongsToLayer(noteDraft, coordinateMode, pageNumber) : false;
+  const editorVisible =
+    !draftVisible && noteEditor ? belongsToLayer(noteEditor, coordinateMode, pageNumber) : false;
 
   return (
     <div
@@ -52,10 +66,7 @@ export function ResumeMarkerLayer({
       {draftVisible ? (
         <div
           className="note-popover"
-          style={{
-            left: `clamp(128px, ${noteDraft.x * 100}%, calc(100% - 128px))`,
-            top: `clamp(8px, ${noteDraft.y * 100}%, calc(100% - 126px))`,
-          }}
+          style={popoverPosition(noteDraft)}
           onClick={(event) => event.stopPropagation()}
         >
           <textarea
@@ -70,6 +81,32 @@ export function ResumeMarkerLayer({
             </button>
             <button type="button" onClick={onCancelDraft}>
               取消
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {editorVisible ? (
+        <div
+          className="note-popover"
+          style={popoverPosition(noteEditor)}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <textarea
+            autoFocus
+            value={noteEditor.text}
+            onChange={(event) => onEditorChange(event.target.value)}
+            placeholder="写一句关键词备注"
+          />
+          <div className="note-actions">
+            <button type="button" className="primary" onClick={onSaveEditor}>
+              保存
+            </button>
+            <button type="button" className="danger" onClick={() => onDeleteNote(noteEditor.id)}>
+              删除
+            </button>
+            <button type="button" onClick={onCloseEditor}>
+              关闭
             </button>
           </div>
         </div>

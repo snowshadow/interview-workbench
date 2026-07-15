@@ -1337,6 +1337,7 @@ button.status-picker-trigger:hover:not(:disabled) {
 .note-popover {
   position: absolute;
   width: min(240px, 72%);
+  pointer-events: auto;
   padding: 10px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -1356,6 +1357,11 @@ button.status-picker-trigger:hover:not(:disabled) {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
+}
+
+.note-actions button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .resume-notes-list {

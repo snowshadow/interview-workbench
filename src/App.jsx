@@ -128,6 +128,7 @@ function App() {
   const [customStatusDraft, setCustomStatusDraft] = useState("");
   const [markMode, setMarkMode] = useState(false);
   const [noteDraft, setNoteDraft] = useState(null);
+  const [noteEditor, setNoteEditor] = useState(null);
   const [selectedNoteId, setSelectedNoteId] = useState("");
   const [resumeZoom, setResumeZoom] = useState(1);
   const [resumeFocusMode, setResumeFocusMode] = useState(false);
@@ -211,6 +212,7 @@ function App() {
   useEffect(() => {
     setMarkMode(false);
     setNoteDraft(null);
+    setNoteEditor(null);
     setSelectedNoteId("");
     setSpeakerEditorOpen(false);
     setStatusPickerOpen(false);
@@ -290,6 +292,9 @@ function App() {
 
     function refreshStoreOnFocus() {
       if (!["idle", "stopped", "error"].includes(statusRef.current)) return;
+      // 本地还有未落库的场次修改（如刚删除的备注）时跳过，
+      // 否则远端旧快照会把这次修改覆盖回来。
+      if (metadataPersistTimersRef.current.size > 0) return;
       loadRemoteInterviewStore()
         .then((remoteStore) => {
           if (remoteStore) {
@@ -420,7 +425,6 @@ function App() {
     const existing = metadataPersistTimersRef.current.get(interview.id);
     if (existing) window.clearTimeout(existing);
     const timer = window.setTimeout(async () => {
-      metadataPersistTimersRef.current.delete(interview.id);
       try {
         await requestJson(`/api/interviews/${encodeURIComponent(interview.id)}`, {
           method: "PATCH",
@@ -429,6 +433,12 @@ function App() {
         setPersistError("");
       } catch {
         setPersistError("场次保存失败，请先导出 Markdown 兜底");
+      } finally {
+        // 请求结束后再移除，focus 刷新守卫要覆盖到请求完成为止；
+        // 期间若重新调度过，map 里已是新 timer，不能误删。
+        if (metadataPersistTimersRef.current.get(interview.id) === timer) {
+          metadataPersistTimersRef.current.delete(interview.id);
+        }
       }
     }, 350);
     metadataPersistTimersRef.current.set(interview.id, timer);
@@ -576,6 +586,7 @@ function App() {
       }
       setMarkMode(false);
       setNoteDraft(null);
+      setNoteEditor(null);
       setSelectedNoteId("");
       setNotesView("hidden");
       setResumePreviewError("");
@@ -713,6 +724,7 @@ function App() {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = Math.min(0.98, Math.max(0.02, (event.clientX - rect.left) / rect.width));
     const y = Math.min(0.98, Math.max(0.02, (event.clientY - rect.top) / rect.height));
+    setNoteEditor(null);
     setNoteDraft({
       id: safeId(),
       x,
@@ -751,10 +763,29 @@ function App() {
       resumeNotes: (interview.resumeNotes || []).filter((note) => note.id !== noteId),
     }));
     if (selectedNoteId === noteId) setSelectedNoteId("");
+    setNoteEditor((editor) => (editor?.id === noteId ? null : editor));
+  }
+
+  function saveNoteEditor() {
+    if (!noteEditor) return;
+    const text = noteEditor.text?.trim();
+    if (!text) {
+      setError("备注内容为空");
+      return;
+    }
+    setError("");
+    updateActiveInterview((interview) => ({
+      resumeNotes: (interview.resumeNotes || []).map((note) =>
+        note.id === noteEditor.id ? { ...note, text } : note,
+      ),
+    }));
+    setNoteEditor(null);
   }
 
   function focusResumeNote(note) {
     setSelectedNoteId(note.id);
+    setNoteDraft(null);
+    setNoteEditor({ ...note });
     if (notesView === "focus") setNotesView("sidebar");
     const scroller = resumeScrollerRef.current;
     if (!scroller) return;
@@ -1797,6 +1828,7 @@ function App() {
               disabled={!canMarkResume}
               onClick={() => {
                 setNoteDraft(null);
+                setNoteEditor(null);
                 setMarkMode((value) => !value);
               }}
               title="在简历上标记备注位置"
@@ -1868,14 +1900,21 @@ function App() {
                       file={resumeFile}
                       markMode={markMode}
                       noteDraft={noteDraft}
+                      noteEditor={noteEditor}
                       notes={resumeNotes}
                       onCancelDraft={() => setNoteDraft(null)}
+                      onCloseEditor={() => setNoteEditor(null)}
+                      onDeleteNote={deleteResumeNote}
                       onDraftChange={(text) =>
                         setNoteDraft((draft) => (draft ? { ...draft, text } : draft))
+                      }
+                      onEditorChange={(text) =>
+                        setNoteEditor((editor) => (editor ? { ...editor, text } : editor))
                       }
                       onFocusNote={focusResumeNote}
                       onMark={handleResumeMark}
                       onSaveDraft={saveResumeNote}
+                      onSaveEditor={saveNoteEditor}
                       selectedNoteId={selectedNoteId}
                       previewError={resumePreviewError}
                       zoom={resumeZoom}
