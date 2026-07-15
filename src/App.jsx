@@ -1,7 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import ReactMarkdown from "react-markdown";
 import {
   BriefcaseBusiness,
   CalendarClock,
@@ -20,7 +18,6 @@ import {
   Plus,
   Radio,
   RefreshCw,
-  RotateCcw,
   Settings,
   Square,
   StickyNote,
@@ -33,17 +30,25 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { SessionLibraryDialog } from "./components/SessionLibraryDialog.jsx";
-import { PanelTitle, StatusPill, TranscriptLine } from "./components/WorkbenchPrimitives.jsx";
+import { PanelTitle, StatusPill } from "./components/WorkbenchPrimitives.jsx";
+import { TranscriptPanel } from "./components/TranscriptPanel.jsx";
+import { AnalysisCardList, isPendingAnalyzeCard } from "./components/AnalysisCardList.jsx";
+import { InterviewFormDialog } from "./components/dialogs/InterviewFormDialog.jsx";
+import {
+  ProviderSettingsDialog,
+  createProviderSettingsDraft,
+} from "./components/dialogs/ProviderSettingsDialog.jsx";
+import { ResumeDocument } from "./components/resume/ResumeDocument.jsx";
 import {
   formatShortDateTime,
   inferInterviewStatus,
   interviewStatusTone,
+  normalizeStatusLabel,
 } from "./interview-domain.js";
 import {
   ApiError,
   apiFetch,
   createAsrWebSocket,
-  getApiHeaders,
   requestJson,
   setAccessToken,
 } from "./api.js";
@@ -55,6 +60,34 @@ import {
   createCaptureError,
   hasAudioTrack,
 } from "./audio-capture.js";
+import {
+  DEFAULT_INTERVIEW_STATUSES,
+  STORE_KEY,
+  clearLegacyInterviewStore,
+  createInterview,
+  interviewMetadataPatch,
+  loadRemoteInterviewStore,
+  mergeStatusOptions,
+  normalizeStore,
+  preserveActiveInterview,
+  safeId,
+  withLocalTranscripts,
+} from "./lib/store-normalize.js";
+import {
+  createPartialTextBridge,
+  extractQuestionLikeLines,
+  formatLineForPrompt,
+  mergeQuestions,
+  mergeTranscriptLines,
+} from "./lib/transcript.js";
+import { CHUNK_MS, CHUNK_SAMPLES, floatTo16BitPcm, resampleTo16k } from "./lib/audio-pipeline.js";
+import {
+  formatFileSize,
+  isPdfFile,
+  isWordFile,
+  serializeResumeFile,
+} from "./lib/resume-files.js";
+import { clampNumber } from "./lib/format.js";
 
 if (!Promise.withResolvers) {
   Promise.withResolvers = function withResolvers() {
@@ -68,21 +101,7 @@ if (!Promise.withResolvers) {
   };
 }
 
-const SAMPLE_RATE = 16000;
-const CHUNK_MS = 200;
-const CHUNK_SAMPLES = (SAMPLE_RATE * CHUNK_MS) / 1000;
-const STORE_KEY = "interview-workbench.sessions.v1";
 const UI_PREF_KEY = "interview-workbench.ui.v1";
-const MAX_RESUME_FILE_SIZE = 4 * 1024 * 1024;
-const DEFAULT_INTERVIEW_STATUSES = [
-  "未面",
-  "已安排",
-  "面试中",
-  "已面待定",
-  "一面通过",
-  "未通过",
-  "放弃/归档",
-];
 
 function App() {
   const [store, setStore] = useState(loadInterviewStore);
@@ -93,7 +112,7 @@ function App() {
   const [accessTokenDraft, setAccessTokenDraft] = useState("");
   const [status, setStatus] = useState("idle");
   const [isPaused, setIsPaused] = useState(false);
-  const [partialText, setPartialText] = useState("");
+  const [hasPartialText, setHasPartialText] = useState(false);
   const [error, setError] = useState("");
   const [sessionLibraryOpen, setSessionLibraryOpen] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
@@ -127,7 +146,9 @@ function App() {
   const pendingInputRef = useRef(new Float32Array(0));
   const statusRef = useRef(status);
   const pausedRef = useRef(isPaused);
-  const partialTextRef = useRef(partialText);
+  const partialTextBridgeRef = useRef(null);
+  if (!partialTextBridgeRef.current) partialTextBridgeRef.current = createPartialTextBridge();
+  const partialTextBridge = partialTextBridgeRef.current;
   const runIdRef = useRef("");
   const resumeScrollerRef = useRef(null);
   const resumeReplaceInputRef = useRef(null);
@@ -135,6 +156,9 @@ function App() {
   const workspaceResizeRef = useRef(null);
   const captureAttemptRef = useRef("");
   const metadataPersistTimersRef = useRef(new Map());
+  const retryAnalysisCardRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const reconnectAttemptRef = useRef(0);
 
   const activeInterview = useMemo(() => {
     return (
@@ -175,8 +199,14 @@ function App() {
   }, [isPaused]);
 
   useEffect(() => {
-    partialTextRef.current = partialText;
-  }, [partialText]);
+    setHasPartialText(Boolean(partialTextBridge.get()));
+    return partialTextBridge.subscribe((text) => setHasPartialText(Boolean(text)));
+  }, [partialTextBridge]);
+
+  useEffect(() => {
+    retryAnalysisCardRef.current = retryAnalysisCard;
+  });
+  const handleRetryCard = useCallback((card) => retryAnalysisCardRef.current(card), []);
 
   useEffect(() => {
     setMarkMode(false);
@@ -282,10 +312,6 @@ function App() {
     refreshHealth();
   }, []);
 
-  const seenSpeakers = useMemo(() => {
-    return Array.from(new Set(lines.map((line) => line.speaker).filter(Boolean)));
-  }, [lines]);
-
   const transcriptText = useMemo(() => {
     return lines
       .map((line) => formatLineForPrompt(line, speakerLabels))
@@ -293,15 +319,20 @@ function App() {
       .trim();
   }, [lines, speakerLabels]);
 
-  const currentSegmentText = useMemo(() => {
+  const getCurrentSegmentText = useCallback(() => {
     const freshLines = lines.slice(lastProcessedLineCount);
     const body = freshLines
       .map((line) => formatLineForPrompt(line, speakerLabels))
       .join("\n")
       .trim();
     if (body) return body;
+    const partialText = partialTextBridge.get();
     return partialText ? `正在识别：${partialText}` : "";
-  }, [lastProcessedLineCount, lines, partialText, speakerLabels]);
+  }, [lastProcessedLineCount, lines, partialTextBridge, speakerLabels]);
+  const currentSegmentText = useMemo(
+    () => getCurrentSegmentText(),
+    [getCurrentSegmentText, hasPartialText],
+  );
   const currentSegmentPending = useMemo(
     () =>
       cards.some(
@@ -440,7 +471,7 @@ function App() {
 
   function switchInterview(interviewId) {
     if (!canSwitchInterview) return;
-    setPartialText("");
+    partialTextBridge.set("");
     setError("");
     setIsPaused(false);
     setSessionLibraryOpen(false);
@@ -639,7 +670,7 @@ function App() {
           withLocalTranscripts({ ...remoteStore, activeInterviewId: nextActiveId }, current),
         );
       }
-      setPartialText("");
+      partialTextBridge.set("");
       setInterviewForm(null);
       setPersistError("");
     } catch (err) {
@@ -655,7 +686,7 @@ function App() {
     if (!window.confirm(`确认删除“${interviewName || "未命名面试"}”？此操作会移入本机回收状态。`)) {
       return;
     }
-    setPartialText("");
+    partialTextBridge.set("");
     setError("");
     setSessionMenuOpen(false);
     try {
@@ -791,7 +822,7 @@ function App() {
     captureAttemptRef.current = captureAttemptId;
     setError("");
     setStatus("connecting");
-    setPartialText("");
+    partialTextBridge.set("");
     pendingInputRef.current = new Float32Array(0);
     runIdRef.current = safeId();
 
@@ -841,49 +872,85 @@ function App() {
         interviewStatus: "面试中",
       }));
 
-      const socket = createAsrWebSocket();
-      socket.binaryType = "arraybuffer";
-      wsRef.current = socket;
-
-      socket.onopen = async () => {
-        try {
-          if (captureAttemptRef.current !== captureAttemptId) return;
-          await startAudioCapture(microphoneStream, displayStream);
-          if (captureAttemptRef.current === captureAttemptId) setStatus("recording");
-        } catch (captureError) {
-          setError(captureError.message || "无法处理音频");
-          setStatus("error");
-          socket.close();
-          stopLocalAudio();
-        }
-      };
-      socket.onmessage = (event) => {
-        if (wsRef.current !== socket) return;
-        handleServerMessage(event.data);
-      };
-      socket.onerror = () => {
-        if (wsRef.current !== socket) return;
-        commitPartialTranscript();
-        setError("转录连接出错");
-        setStatus("error");
-        socket.close();
-        stopLocalAudio();
-      };
-      socket.onclose = () => {
-        if (wsRef.current !== socket) return;
-        if (statusRef.current !== "stopped") {
-          commitPartialTranscript();
-          setStatus("stopped");
-          setError("转录连接已断开，请重新开始面试");
-        }
-        stopLocalAudio();
-      };
+      reconnectAttemptRef.current = 0;
+      openAsrSocket(captureAttemptId);
     } catch (err) {
       if (captureAttemptRef.current !== captureAttemptId) return;
       setError(audioCaptureErrorMessage(err, audioSourceMode));
       setStatus("error");
       stopLocalAudio();
     }
+  }
+
+  function openAsrSocket(captureAttemptId, { reconnectAttempt = 0 } = {}) {
+    const socket = createAsrWebSocket();
+    socket.binaryType = "arraybuffer";
+    wsRef.current = socket;
+
+    socket.onopen = async () => {
+      try {
+        if (captureAttemptRef.current !== captureAttemptId) return;
+        if (!audioContextRef.current) {
+          await startAudioCapture(streamRef.current, displayStreamRef.current);
+        }
+        if (captureAttemptRef.current !== captureAttemptId) return;
+        setStatus("recording");
+        if (reconnectAttempt > 0) setError("");
+        reconnectAttemptRef.current = 0;
+      } catch (captureError) {
+        setError(captureError.message || "无法处理音频");
+        setStatus("error");
+        socket.close();
+        stopLocalAudio();
+      }
+    };
+    socket.onmessage = (event) => {
+      if (wsRef.current !== socket) return;
+      handleServerMessage(event.data);
+    };
+    socket.onerror = () => {
+      if (wsRef.current !== socket) return;
+      socket.close();
+    };
+    socket.onclose = () => {
+      if (wsRef.current !== socket) return;
+      if (statusRef.current === "stopped") {
+        stopLocalAudio();
+        return;
+      }
+      if (
+        captureAttemptRef.current === captureAttemptId &&
+        ["recording", "reconnecting", "connecting"].includes(statusRef.current)
+      ) {
+        scheduleAsrReconnect(captureAttemptId);
+        return;
+      }
+      commitPartialTranscript();
+      setStatus("stopped");
+      setError("转录连接已断开，请重新开始面试");
+      stopLocalAudio();
+    };
+  }
+
+  function scheduleAsrReconnect(captureAttemptId) {
+    const attempt = reconnectAttemptRef.current + 1;
+    if (attempt > 5) {
+      commitPartialTranscript();
+      setError("转录连接已断开，请重新开始面试");
+      setStatus("error");
+      stopLocalAudio();
+      return;
+    }
+    reconnectAttemptRef.current = attempt;
+    setStatus("reconnecting");
+    setError("转录连接中断，正在重连");
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      if (captureAttemptRef.current !== captureAttemptId) return;
+      if (!["recording", "reconnecting", "connecting"].includes(statusRef.current)) return;
+      openAsrSocket(captureAttemptId, { reconnectAttempt: attempt });
+    }, 800 * attempt);
   }
 
   async function startAudioCapture(microphoneStream, displayStream = null) {
@@ -997,11 +1064,11 @@ function App() {
         };
       });
       appendTranscriptLines(activeInterviewId, definite);
-      setPartialText("");
+      partialTextBridge.set("");
     } else if (partial?.text) {
-      setPartialText(partial.text);
+      partialTextBridge.set(partial.text);
     } else if (message.text) {
-      setPartialText(message.text);
+      partialTextBridge.set(message.text);
     }
   }
 
@@ -1032,6 +1099,11 @@ function App() {
 
   function stopLocalAudio() {
     captureAttemptRef.current = "";
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttemptRef.current = 0;
     workletRef.current?.disconnect();
     mutedGainRef.current?.disconnect();
     audioContextRef.current?.close().catch(() => {});
@@ -1045,8 +1117,17 @@ function App() {
     mutedGainRef.current = null;
   }
 
+  function handleSpeakerLabelChange(speaker, value) {
+    updateActiveInterview((interview) => ({
+      speakerLabels: {
+        ...interview.speakerLabels,
+        [speaker]: value,
+      },
+    }));
+  }
+
   function commitPartialTranscript() {
-    const text = partialTextRef.current.trim();
+    const text = partialTextBridge.get().trim();
     if (!text) return;
     const line = {
       runId: runIdRef.current || "partial",
@@ -1057,11 +1138,11 @@ function App() {
       lines: mergeTranscriptLines(interview.lines, [line]),
     }));
     appendTranscriptLines(activeInterviewId, [line]);
-    setPartialText("");
+    partialTextBridge.set("");
   }
 
   async function processNow() {
-    const transcriptSlice = currentSegmentText.trim();
+    const transcriptSlice = getCurrentSegmentText().trim();
     if (!transcriptSlice) {
       setError("这一段还没有可处理的转录文本");
       return;
@@ -1906,831 +1987,22 @@ function App() {
                 立即追问
               </button>
             </PanelTitle>
-            <div className="cards-list">
-              {cards.length === 0 ? <div className="empty">等待第一次处理</div> : null}
-              {cards.map((card) => (
-                <article
-                  className={`ai-card ${
-                    isPendingAnalyzeCard(card) ? "loading" : card.status
-                  }`}
-                  key={card.id}
-                >
-                  <div className="card-meta">
-                    <span>{new Date(card.createdAt).toLocaleTimeString()}</span>
-                    <div>
-                      <span>{cardStatusLabel(card)}</span>
-                      {card.status === "error" && card.transcriptSlice ? (
-                        <button
-                          className="card-retry"
-                          onClick={() => retryAnalysisCard(card)}
-                          title="重新分析这段转录"
-                        >
-                          <RotateCcw size={13} />
-                          重试
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-                  <ReactMarkdown>{card.markdown}</ReactMarkdown>
-                </article>
-              ))}
-            </div>
+            <AnalysisCardList cards={cards} onRetry={handleRetryCard} />
           </section>
 
-          <section className="transcript pane compact-transcript">
-            <PanelTitle icon={<Mic size={18} />} title="实时转录">
-              {seenSpeakers.length ? (
-                <button
-                  className={speakerEditorOpen ? "icon-button primary" : "icon-button"}
-                  onClick={() => setSpeakerEditorOpen((open) => !open)}
-                  title="编辑说话人名称"
-                  aria-label="编辑说话人名称"
-                >
-                  <Pencil size={16} />
-                </button>
-              ) : null}
-            </PanelTitle>
-            {speakerEditorOpen ? (
-              <div className="speaker-inline-editor">
-                {seenSpeakers.map((speaker) => (
-                  <label key={speaker}>
-                    <span>说话人 {speaker}</span>
-                    <input
-                      value={speakerLabels[speaker] || ""}
-                      onChange={(event) =>
-                        updateActiveInterview((interview) => ({
-                          speakerLabels: {
-                            ...interview.speakerLabels,
-                            [speaker]: event.target.value,
-                          },
-                        }))
-                      }
-                      placeholder={`默认显示为说话人 ${speaker}`}
-                    />
-                  </label>
-                ))}
-              </div>
-            ) : null}
-            <div className="transcript-list">
-              {lines.length === 0 && !partialText ? (
-                <div className="empty">等待转录</div>
-              ) : null}
-              {partialText ? (
-                <div className="line partial">
-                  <div className="line-meta">正在识别</div>
-                  <div className="line-text">{partialText}</div>
-                </div>
-              ) : null}
-              {lines
-                .map((line, index) => ({ line, index }))
-                .reverse()
-                .map(({ line, index }) => (
-                  <TranscriptLine
-                    key={line.id}
-                    line={line}
-                    speakerLabels={speakerLabels}
-                    processed={index < lastProcessedLineCount}
-                  />
-                ))}
-            </div>
-          </section>
+          <TranscriptPanel
+            lastProcessedLineCount={lastProcessedLineCount}
+            lines={lines}
+            onSpeakerLabelChange={handleSpeakerLabelChange}
+            onToggleSpeakerEditor={() => setSpeakerEditorOpen((open) => !open)}
+            partialTextBridge={partialTextBridge}
+            speakerEditorOpen={speakerEditorOpen}
+            speakerLabels={speakerLabels}
+          />
         </section>
       </section>
     </main>
   );
-}
-
-function InterviewFormDialog({
-  form,
-  jdLibrary,
-  onChange,
-  onClose,
-  onResumeFileChange,
-  onSelectJd,
-  onSubmit,
-  statusOptions,
-  submitting = false,
-}) {
-  const isCreate = form.mode === "create";
-
-  return (
-    <div
-      className="dialog-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <form
-        className="interview-form-dialog"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="dialog-header">
-          <div>
-            <h2>{isCreate ? "新建面试" : "编辑面试资料"}</h2>
-            <p>{isCreate ? "一次填好候选人与面试准备信息" : "修改当前场次的资料与准备内容"}</p>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭">
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="interview-form-body">
-          <section className="form-section">
-            <h3>基本信息</h3>
-            <div className="form-grid form-grid-basic">
-              <label>
-                <span>候选人姓名</span>
-                <input
-                  autoFocus
-                  required
-                  value={form.name}
-                  onChange={(event) => onChange({ name: event.target.value })}
-                  placeholder="例如：张宇"
-                />
-              </label>
-              <label>
-                <span>面试状态</span>
-                <input
-                  list="interview-status-options"
-                  maxLength={24}
-                  placeholder="选择或输入状态"
-                  required
-                  value={form.interviewStatus}
-                  onChange={(event) => onChange({ interviewStatus: event.target.value })}
-                />
-                <datalist id="interview-status-options">
-                  {statusOptions.map((status) => (
-                    <option key={status} value={status} />
-                  ))}
-                </datalist>
-              </label>
-              <label>
-                <span>计划面试时间</span>
-                <input
-                  type="datetime-local"
-                  value={form.scheduledAt}
-                  onChange={(event) => onChange({ scheduledAt: event.target.value })}
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="form-section">
-            <h3>岗位与 JD</h3>
-            <div className="form-grid form-grid-jd">
-              <label>
-                <span>已保存 JD</span>
-                <select value={form.selectedJdId} onChange={(event) => onSelectJd(event.target.value)}>
-                  <option value="">新建或不关联 JD</option>
-                  {jdLibrary.map((jd) => (
-                    <option key={jd.id} value={jd.id}>
-                      {jd.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>岗位名称</span>
-                <input
-                  value={form.jdDraftName}
-                  onChange={(event) => onChange({ jdDraftName: event.target.value })}
-                  placeholder="例如：大模型应用研发工程师"
-                />
-              </label>
-            </div>
-            <label>
-              <span>岗位 JD / 能力要求</span>
-              <textarea
-                value={form.roleMarkdown}
-                onChange={(event) => onChange({ roleMarkdown: event.target.value })}
-                placeholder="粘贴岗位 JD 或能力要求 Markdown"
-              />
-            </label>
-            <label className="checkbox-field">
-              <input
-                type="checkbox"
-                checked={form.saveJdToLibrary}
-                onChange={(event) => onChange({ saveJdToLibrary: event.target.checked })}
-              />
-              <span>将本次 JD 保存或同步到 JD 库</span>
-            </label>
-          </section>
-
-          <section className="form-section">
-            <h3>候选人准备</h3>
-            <div className="resume-upload-field">
-              <div>
-                <span>简历附件</span>
-                <p>
-                  {form.resumeFile
-                    ? `${form.resumeFile.name} · ${formatFileSize(form.resumeFile.size)}`
-                    : "尚未上传"}
-                </p>
-              </div>
-              <div className="resume-upload-actions">
-                <input
-                  className="file-input"
-                  id="interview-form-resume-upload"
-                  type="file"
-                  accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                  onChange={onResumeFileChange}
-                />
-                <label className="file-button" htmlFor="interview-form-resume-upload">
-                  <Upload size={16} />
-                  {form.resumeFile ? "替换" : "上传"}
-                </label>
-                {form.resumeFile ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    title="移除简历"
-                    aria-label="移除简历"
-                    onClick={() => onChange({ resumeFile: null, resumeFileChanged: true })}
-                  >
-                    <X size={17} />
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            <label>
-              <span>简历预分析</span>
-              <textarea
-                value={form.resumeMarkdown}
-                onChange={(event) => onChange({ resumeMarkdown: event.target.value })}
-                placeholder="粘贴简历预分析 Markdown"
-              />
-            </label>
-          </section>
-
-        </div>
-
-        <div className="dialog-footer">
-          <button type="button" onClick={onClose}>
-            取消
-          </button>
-          <button className="primary" type="submit" disabled={submitting}>
-            {submitting ? "保存中..." : isCreate ? "创建场次" : "保存修改"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function ProviderSettingsDialog({ draft, error, onChange, onClose, onSubmit, saving }) {
-  function patchSection(section, patch) {
-    onChange((current) => ({
-      ...current,
-      [section]: { ...current[section], ...patch },
-    }));
-  }
-
-  return (
-    <div
-      className="dialog-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !saving) onClose();
-      }}
-    >
-      <form
-        className="provider-settings-dialog"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="dialog-header">
-          <div>
-            <h2>服务配置</h2>
-            <p>密钥只保存在本机，不会显示在页面或导出备份中</p>
-          </div>
-          <button
-            aria-label="关闭配置"
-            className="icon-button"
-            disabled={saving}
-            onClick={onClose}
-            title="关闭"
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="provider-settings-body">
-          {error ? <div className="settings-error">{error}</div> : null}
-          {!draft ? <div className="settings-loading">正在读取配置...</div> : (
-            <>
-              <section className="form-section provider-section">
-                <div className="provider-section-heading">
-                  <div>
-                    <h3>语音识别</h3>
-                    <p>火山引擎流式语音识别</p>
-                  </div>
-                  <span className={`provider-state ${draft.asr.configured ? "ready" : "warn"}`}>
-                    {draft.asr.configured ? "已配置" : "待配置"}
-                  </span>
-                </div>
-                <label>
-                  <span>API Key</span>
-                  <input
-                    autoComplete="new-password"
-                    onChange={(event) => patchSection("asr", { apiKey: event.target.value })}
-                    placeholder={draft.asr.apiKeyConfigured ? "已配置，留空则不修改" : "请输入火山引擎 API Key"}
-                    type="password"
-                    value={draft.asr.apiKey}
-                  />
-                </label>
-                {draft.asr.apiKeyStored ? (
-                  <label className="checkbox-field settings-clear-field">
-                    <input
-                      checked={draft.asr.clearApiKey}
-                      onChange={(event) => patchSection("asr", { clearApiKey: event.target.checked })}
-                      type="checkbox"
-                    />
-                    <span>删除工作台保存的 API Key</span>
-                  </label>
-                ) : null}
-                <details className="settings-details">
-                  <summary>旧版火山引擎凭证</summary>
-                  <div className="settings-details-body form-grid form-grid-jd">
-                    <label>
-                      <span>App Key</span>
-                      <input
-                        autoComplete="new-password"
-                        onChange={(event) => patchSection("asr", { appKey: event.target.value })}
-                        placeholder={draft.asr.legacyCredentialsConfigured ? "已配置，留空则不修改" : "可选"}
-                        type="password"
-                        value={draft.asr.appKey}
-                      />
-                    </label>
-                    <label>
-                      <span>Access Key</span>
-                      <input
-                        autoComplete="new-password"
-                        onChange={(event) => patchSection("asr", { accessKey: event.target.value })}
-                        placeholder={draft.asr.legacyCredentialsConfigured ? "已配置，留空则不修改" : "可选"}
-                        type="password"
-                        value={draft.asr.accessKey}
-                      />
-                    </label>
-                  </div>
-                  {draft.asr.legacyCredentialsStored ? (
-                    <label className="checkbox-field settings-clear-field">
-                      <input
-                        checked={draft.asr.clearLegacyCredentials}
-                        onChange={(event) => patchSection("asr", { clearLegacyCredentials: event.target.checked })}
-                        type="checkbox"
-                      />
-                      <span>删除工作台保存的旧版凭证</span>
-                    </label>
-                  ) : null}
-                </details>
-                <details className="settings-details">
-                  <summary>高级设置</summary>
-                  <div className="settings-details-body">
-                    <label>
-                      <span>资源 ID</span>
-                      <input
-                        onChange={(event) => patchSection("asr", { resourceId: event.target.value })}
-                        value={draft.asr.resourceId}
-                      />
-                    </label>
-                    <label>
-                      <span>WebSocket 地址</span>
-                      <input
-                        onChange={(event) => patchSection("asr", { url: event.target.value })}
-                        value={draft.asr.url}
-                      />
-                    </label>
-                  </div>
-                </details>
-              </section>
-
-              <section className="form-section provider-section">
-                <div className="provider-section-heading">
-                  <div>
-                    <h3>大模型</h3>
-                    <p>DeepSeek 或其他兼容 OpenAI 的服务</p>
-                  </div>
-                  <span className={`provider-state ${draft.llm.configured ? "ready" : "warn"}`}>
-                    {draft.llm.configured ? "已配置" : "待配置"}
-                  </span>
-                </div>
-                <label>
-                  <span>API Key</span>
-                  <input
-                    autoComplete="new-password"
-                    onChange={(event) => patchSection("llm", { apiKey: event.target.value })}
-                    placeholder={draft.llm.apiKeyConfigured ? "已配置，留空则不修改" : "请输入大模型 API Key"}
-                    type="password"
-                    value={draft.llm.apiKey}
-                  />
-                </label>
-                {draft.llm.apiKeyStored ? (
-                  <label className="checkbox-field settings-clear-field">
-                    <input
-                      checked={draft.llm.clearApiKey}
-                      onChange={(event) => patchSection("llm", { clearApiKey: event.target.checked })}
-                      type="checkbox"
-                    />
-                    <span>删除工作台保存的 API Key</span>
-                  </label>
-                ) : null}
-                <div className="form-grid form-grid-jd settings-model-grid">
-                  <label>
-                    <span>API 地址</span>
-                    <input
-                      onChange={(event) => patchSection("llm", { baseUrl: event.target.value })}
-                      value={draft.llm.baseUrl}
-                    />
-                  </label>
-                  <label>
-                    <span>模型名称</span>
-                    <input
-                      onChange={(event) => patchSection("llm", { model: event.target.value })}
-                      value={draft.llm.model}
-                    />
-                  </label>
-                </div>
-                <details className="settings-details">
-                  <summary>高级设置</summary>
-                  <div className="settings-details-body">
-                    <label>
-                      <span>请求超时（毫秒）</span>
-                      <input
-                        max="300000"
-                        min="1000"
-                        onChange={(event) => patchSection("llm", { timeoutMs: event.target.value })}
-                        step="1000"
-                        type="number"
-                        value={draft.llm.timeoutMs}
-                      />
-                    </label>
-                  </div>
-                </details>
-              </section>
-            </>
-          )}
-        </div>
-
-        <div className="dialog-footer">
-          <button disabled={saving} onClick={onClose} type="button">取消</button>
-          <button className="primary" disabled={!draft || saving} type="submit">
-            {saving ? "保存中..." : "保存配置"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function createProviderSettingsDraft(settings) {
-  return {
-    asr: {
-      ...settings.asr,
-      apiKey: "",
-      appKey: "",
-      accessKey: "",
-      clearApiKey: false,
-      clearLegacyCredentials: false,
-    },
-    llm: {
-      ...settings.llm,
-      apiKey: "",
-      clearApiKey: false,
-    },
-  };
-}
-
-function ResumeDocument({
-  file,
-  markMode,
-  noteDraft,
-  notes,
-  onCancelDraft,
-  onDraftChange,
-  onFocusNote,
-  onMark,
-  onSaveDraft,
-  previewError,
-  selectedNoteId,
-  zoom,
-}) {
-  const markerProps = {
-    markMode,
-    noteDraft,
-    notes,
-    onCancelDraft,
-    onDraftChange,
-    onFocusNote,
-    onMark,
-    onSaveDraft,
-    selectedNoteId,
-  };
-
-  if (isPdfFile(file)) {
-    return <PdfPreview file={file} markerProps={markerProps} zoom={zoom} />;
-  }
-
-  if (isWordFile(file) && file.previewText) {
-    return <DocxPreview file={file} markerProps={markerProps} zoom={zoom} />;
-  }
-
-  if (isWordFile(file) && !previewError) {
-    return (
-      <div className="resume-file-placeholder">
-        <FileText size={30} />
-        <p>{file.name}</p>
-        <span>正在生成 Word 预览...</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="resume-file-placeholder">
-      <FileText size={30} />
-      <p>{file.name}</p>
-      <span>{previewError || "文件已保存到当前面试；当前格式先用下载查看。"}</span>
-      <a href={resumeFileSource(file)} download={file.name}>
-        下载查看
-      </a>
-    </div>
-  );
-}
-
-function ResumeMarkerLayer({
-  coordinateMode,
-  markMode,
-  noteDraft,
-  notes,
-  onCancelDraft,
-  onDraftChange,
-  onFocusNote,
-  onMark,
-  onSaveDraft,
-  pageNumber = null,
-  selectedNoteId,
-}) {
-  const layerNotes = notes.filter((note) => {
-    const noteMode = note.coordinateMode || "content";
-    if (noteMode !== coordinateMode) return false;
-    return coordinateMode !== "page" || Number(note.pageNumber) === Number(pageNumber);
-  });
-  const draftVisible =
-    noteDraft?.coordinateMode === coordinateMode &&
-    (coordinateMode !== "page" || Number(noteDraft.pageNumber) === Number(pageNumber));
-
-  return (
-    <div
-      className={`resume-mark-layer ${markMode ? "marking" : ""}`}
-      onClick={(event) =>
-        onMark(event, {
-          coordinateMode,
-          pageNumber,
-        })
-      }
-    >
-      {layerNotes.map((note) => (
-        <button
-          type="button"
-          className={`resume-note-marker ${selectedNoteId === note.id ? "selected" : ""}`}
-          data-resume-note-id={note.id}
-          key={note.id}
-          style={{ left: `${note.x * 100}%`, top: `${note.y * 100}%` }}
-          title={note.text}
-          onClick={(event) => {
-            event.stopPropagation();
-            onFocusNote(note);
-          }}
-        >
-          <StickyNote size={13} />
-        </button>
-      ))}
-
-      {draftVisible ? (
-        <div
-          className="note-popover"
-          style={{
-            left: `clamp(128px, ${noteDraft.x * 100}%, calc(100% - 128px))`,
-            top: `clamp(8px, ${noteDraft.y * 100}%, calc(100% - 126px))`,
-          }}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <textarea
-            autoFocus
-            value={noteDraft.text}
-            onChange={(event) => onDraftChange(event.target.value)}
-            placeholder="写一句关键词备注"
-          />
-          <div className="note-actions">
-            <button type="button" className="primary" onClick={onSaveDraft}>
-              保存
-            </button>
-            <button type="button" onClick={onCancelDraft}>
-              取消
-            </button>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function PdfPreview({ file, markerProps, zoom }) {
-  const containerRef = useRef(null);
-  const [pages, setPages] = useState([]);
-  const [availableWidth, setAvailableWidth] = useState(0);
-  const [pdfError, setPdfError] = useState("");
-
-  useEffect(() => {
-    const node = containerRef.current;
-    if (!node) return undefined;
-
-    let frame = 0;
-    function updateWidth() {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        setAvailableWidth(Math.max(260, node.clientWidth));
-      });
-    }
-
-    updateWidth();
-    const observer = new ResizeObserver(updateWidth);
-    observer.observe(node);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!resumeFileSource(file)) return undefined;
-
-    let cancelled = false;
-    let loadingTask = null;
-
-    setPages([]);
-    setPdfError("");
-
-    async function loadPdf() {
-      const pdfjsLib = await import("pdfjs-dist");
-      pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-      if (cancelled) return;
-
-      loadingTask = pdfjsLib.getDocument(
-        file.dataUrl
-          ? { data: dataUrlToUint8Array(file.dataUrl), disableWorker: true }
-          : { url: file.url, httpHeaders: getApiHeaders(), disableWorker: true },
-      );
-
-      const pdf = await loadingTask.promise;
-      const loadedPages = [];
-      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-        if (cancelled) return;
-        loadedPages.push(await pdf.getPage(pageNumber));
-      }
-      if (!cancelled) setPages(loadedPages);
-    }
-
-    loadPdf()
-      .catch((error) => {
-        console.error("[pdf-preview]", error);
-        if (!cancelled) setPdfError("PDF 预览失败，可先下载查看");
-      });
-
-    return () => {
-      cancelled = true;
-      loadingTask?.destroy();
-    };
-  }, [file?.dataUrl, file?.url]);
-
-  return (
-    <div className="pdf-preview-viewport" ref={containerRef}>
-      <div className="pdf-preview-pages">
-        {pdfError ? (
-          <div className="resume-file-placeholder">
-            <FileText size={28} />
-            <p>{pdfError}</p>
-            <a href={resumeFileSource(file)} download={file.name}>
-              下载查看
-            </a>
-          </div>
-        ) : null}
-        {!pdfError && !pages.length ? <div className="pdf-loading">正在加载 PDF</div> : null}
-        {!pdfError
-          ? pages.map((page) => (
-              <PdfPageCanvas
-                availableWidth={availableWidth}
-                key={page.pageNumber}
-                markerProps={markerProps}
-                page={page}
-                zoom={zoom}
-              />
-            ))
-          : null}
-        <ResumeMarkerLayer
-          {...markerProps}
-          coordinateMode="content"
-          markMode={false}
-          noteDraft={null}
-        />
-      </div>
-    </div>
-  );
-}
-
-function PdfPageCanvas({ page, availableWidth, markerProps, zoom }) {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    if (!page || !availableWidth || !canvasRef.current) return undefined;
-
-    const baseViewport = page.getViewport({ scale: 1 });
-    const targetWidth = Math.max(260, (availableWidth - 34) * zoom);
-    const scale = targetWidth / baseViewport.width;
-    const viewport = page.getViewport({ scale });
-    const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
-    const canvas = canvasRef.current;
-    const context = canvas.getContext("2d");
-
-    canvas.width = Math.floor(viewport.width * pixelRatio);
-    canvas.height = Math.floor(viewport.height * pixelRatio);
-    canvas.style.width = `${Math.floor(viewport.width)}px`;
-    canvas.style.height = `${Math.floor(viewport.height)}px`;
-
-    const renderContext = {
-      canvasContext: context,
-      viewport,
-    };
-    if (pixelRatio !== 1) {
-      renderContext.transform = [pixelRatio, 0, 0, pixelRatio, 0, 0];
-    }
-
-    const renderTask = page.render(renderContext);
-    renderTask.promise.catch(() => {});
-
-    return () => {
-      renderTask.cancel();
-    };
-  }, [availableWidth, page, zoom]);
-
-  return (
-    <div className="pdf-page">
-      <canvas aria-label={`PDF 第 ${page.pageNumber} 页`} ref={canvasRef} />
-      <ResumeMarkerLayer
-        {...markerProps}
-        coordinateMode="page"
-        pageNumber={page.pageNumber}
-      />
-    </div>
-  );
-}
-
-function DocxPreview({ file, markerProps, zoom }) {
-  const containerRef = useRef(null);
-  const [availableWidth, setAvailableWidth] = useState(0);
-
-  useEffect(() => {
-    const node = containerRef.current;
-    if (!node) return undefined;
-    let frame = 0;
-    function updateWidth() {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => setAvailableWidth(node.clientWidth));
-    }
-    updateWidth();
-    const observer = new ResizeObserver(updateWidth);
-    observer.observe(node);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, []);
-
-  const fitScale = availableWidth ? Math.min(1, Math.max(0.35, (availableWidth - 34) / 794)) : 1;
-  const scale = clampNumber(fitScale * zoom, 0.25, 2);
-
-  return (
-    <div className="docx-preview-viewport" ref={containerRef}>
-      <div className="docx-preview-canvas" style={{ zoom: scale }}>
-        <pre>{file.previewText}</pre>
-        <ResumeMarkerLayer {...markerProps} coordinateMode="document" />
-        <ResumeMarkerLayer
-          {...markerProps}
-          coordinateMode="content"
-          markMode={false}
-          noteDraft={null}
-        />
-      </div>
-    </div>
-  );
-}
-
-function isPendingAnalyzeCard(card) {
-  return ["queued", "running", "retrying", "loading"].includes(card?.status);
 }
 
 function analyzeJobPlaceholder(job) {
@@ -2741,42 +2013,6 @@ function analyzeJobPlaceholder(job) {
     return `正在分析...（${job.attempts || 1}/${job.maxAttempts || 3}）`;
   }
   return "等待分析...";
-}
-
-function cardStatusLabel(card) {
-  const labels = {
-    queued: "排队中",
-    running: "处理中",
-    retrying: "重试中",
-    done: "Markdown",
-    error: "失败",
-    loading: "处理中",
-  };
-  return labels[card.status] || "Markdown";
-}
-
-function createInterview(name = "未命名面试") {
-  const now = new Date().toISOString();
-  return {
-    id: safeId(),
-    name,
-    createdAt: now,
-    updatedAt: now,
-    sessionStartedAt: null,
-    scheduledAt: "",
-    interviewStatus: "未面",
-    resumeMarkdown: "",
-    roleMarkdown: "",
-    resumeFile: null,
-    resumeNotes: [],
-    selectedJdId: "",
-    jdDraftName: "",
-    lines: [],
-    cards: [],
-    askedQuestions: [],
-    lastProcessedLineCount: 0,
-    speakerLabels: {},
-  };
 }
 
 function loadInterviewStore() {
@@ -2797,236 +2033,6 @@ function loadInterviewStore() {
   };
 }
 
-function clearLegacyInterviewStore() {
-  try {
-    localStorage.removeItem(STORE_KEY);
-    localStorage.setItem(
-      `${STORE_KEY}.server`,
-      JSON.stringify({ migratedAt: new Date().toISOString() }),
-    );
-  } catch {
-    // Browser storage is only a migration cache now; the server file is primary.
-  }
-}
-
-async function loadRemoteInterviewStore() {
-  const data = await requestJson("/api/store");
-  return data.store ? normalizeStore(data.store) : null;
-}
-
-function interviewMetadataPatch(interview) {
-  return {
-    name: interview.name,
-    sessionStartedAt: interview.sessionStartedAt,
-    scheduledAt: interview.scheduledAt,
-    interviewStatus: interview.interviewStatus,
-    resumeMarkdown: interview.resumeMarkdown,
-    roleMarkdown: interview.roleMarkdown,
-    resumeNotes: interview.resumeNotes,
-    selectedJdId: interview.selectedJdId,
-    jdDraftName: interview.jdDraftName,
-    speakerLabels: interview.speakerLabels,
-    askedQuestions: interview.askedQuestions,
-  };
-}
-
-function normalizeStore(store) {
-  const interviews = Array.isArray(store?.interviews)
-    ? store.interviews.map(normalizeInterview)
-    : [];
-  const fallback = createInterview("未命名面试");
-  const nextInterviews = interviews.length ? interviews : [fallback];
-  const activeInterviewId =
-    store?.activeInterviewId &&
-    nextInterviews.some((interview) => interview.id === store.activeInterviewId)
-      ? store.activeInterviewId
-      : nextInterviews[0].id;
-  return {
-    activeInterviewId,
-    interviews: nextInterviews,
-    jdLibrary: Array.isArray(store?.jdLibrary)
-      ? store.jdLibrary.map(normalizeSavedJd)
-      : [],
-    statusOptions: mergeStatusOptions(store?.statusOptions, nextInterviews),
-  };
-}
-
-function preserveActiveInterview(remoteStore, preferredInterviewId) {
-  const normalized = normalizeStore(remoteStore);
-  return normalized.interviews.some((interview) => interview.id === preferredInterviewId)
-    ? { ...normalized, activeInterviewId: preferredInterviewId }
-    : normalized;
-}
-
-// getStore 只内联活跃场次的转录；远端未带 lines 的场次保留本地已加载的转录，
-// 避免焦点刷新把界面上的转录清空。
-function withLocalTranscripts(nextStore, currentStore) {
-  if (!nextStore) return nextStore;
-  const localById = new Map(
-    (currentStore?.interviews || []).map((interview) => [interview.id, interview]),
-  );
-  return {
-    ...nextStore,
-    interviews: nextStore.interviews.map((interview) => {
-      if (interview.lines.length) return interview;
-      const local = localById.get(interview.id);
-      return local?.lines?.length ? { ...interview, lines: local.lines } : interview;
-    }),
-  };
-}
-
-function mergeInterviewStores(localStore, remoteStore) {
-  if (!remoteStore?.interviews?.length) return normalizeStore(localStore);
-
-  const local = normalizeStore(localStore);
-  const remote = normalizeStore(remoteStore);
-  const byId = new Map();
-  for (const interview of [...remote.interviews, ...local.interviews]) {
-    const existing = byId.get(interview.id);
-    if (!existing || isNewerInterview(interview, existing)) {
-      byId.set(interview.id, interview);
-    }
-  }
-
-  let interviews = Array.from(byId.values()).sort(
-    (left, right) =>
-      new Date(right.updatedAt || right.createdAt || 0).getTime() -
-      new Date(left.updatedAt || left.createdAt || 0).getTime(),
-  );
-  if (interviews.some(isMeaningfulInterview)) {
-    interviews = interviews.filter(isMeaningfulInterview);
-  }
-  if (!interviews.length) interviews = [createInterview("未命名面试")];
-
-  const localMeaningful = local.interviews.some(isMeaningfulInterview);
-  const remoteMeaningful = remote.interviews.some(isMeaningfulInterview);
-  const activeInterviewId =
-    localMeaningful && interviews.some((item) => item.id === local.activeInterviewId)
-      ? local.activeInterviewId
-      : remoteMeaningful &&
-          interviews.some((item) => item.id === remote.activeInterviewId)
-        ? remote.activeInterviewId
-        : interviews[0].id;
-
-  return {
-    activeInterviewId,
-    interviews,
-    jdLibrary: mergeSavedJds(local.jdLibrary, remote.jdLibrary),
-    statusOptions: mergeStatusOptions(
-      local.statusOptions,
-      remote.statusOptions,
-      interviews,
-    ),
-  };
-}
-
-function isNewerInterview(left, right) {
-  return (
-    new Date(left.updatedAt || left.createdAt || 0).getTime() >=
-    new Date(right.updatedAt || right.createdAt || 0).getTime()
-  );
-}
-
-function isMeaningfulInterview(interview) {
-  return Boolean(
-    interview?.sessionStartedAt ||
-      interview?.resumeMarkdown?.trim() ||
-      interview?.roleMarkdown?.trim() ||
-      interview?.resumeFile ||
-      interview?.resumeNotes?.length ||
-      interview?.lines?.length ||
-      interview?.cards?.length ||
-      interview?.askedQuestions?.length ||
-      (interview?.name && interview.name !== "未命名面试"),
-  );
-}
-
-function mergeSavedJds(localJds = [], remoteJds = []) {
-  const byId = new Map();
-  for (const jd of [...remoteJds, ...localJds]) {
-    const existing = byId.get(jd.id);
-    if (
-      !existing ||
-      new Date(jd.updatedAt || jd.createdAt || 0).getTime() >=
-        new Date(existing.updatedAt || existing.createdAt || 0).getTime()
-    ) {
-      byId.set(jd.id, jd);
-    }
-  }
-  return Array.from(byId.values()).sort(
-    (left, right) =>
-      new Date(right.updatedAt || right.createdAt || 0).getTime() -
-      new Date(left.updatedAt || left.createdAt || 0).getTime(),
-  );
-}
-
-function normalizeInterview(interview) {
-  const fallback = createInterview(interview?.name || "未命名面试");
-  const merged = { ...fallback, ...interview };
-  return {
-    ...merged,
-    scheduledAt: normalizeDateValue(interview?.scheduledAt),
-    interviewStatus:
-      normalizeStatusLabel(interview?.interviewStatus) || inferInterviewStatus(merged),
-    lines: Array.isArray(interview?.lines) ? interview.lines : [],
-    transcriptLineCount: Number.isFinite(Number(interview?.transcriptLineCount))
-      ? Number(interview.transcriptLineCount)
-      : Array.isArray(interview?.lines)
-        ? interview.lines.length
-        : 0,
-    cards: Array.isArray(interview?.cards) ? interview.cards : [],
-    askedQuestions: Array.isArray(interview?.askedQuestions)
-      ? interview.askedQuestions
-      : [],
-    resumeFile:
-      interview?.resumeFile && typeof interview.resumeFile === "object"
-        ? interview.resumeFile
-        : null,
-    resumeNotes: Array.isArray(interview?.resumeNotes)
-      ? interview.resumeNotes
-      : [],
-    speakerLabels:
-      interview?.speakerLabels && typeof interview.speakerLabels === "object"
-        ? interview.speakerLabels
-        : {},
-  };
-}
-
-function normalizeStatusLabel(value) {
-  if (typeof value !== "string") return "";
-  return value.trim().replace(/\s+/g, " ").slice(0, 24);
-}
-
-function mergeStatusOptions(...sources) {
-  const statuses = [];
-  const seen = new Set();
-  const add = (value) => {
-    const status = normalizeStatusLabel(
-      typeof value === "string" ? value : value?.interviewStatus,
-    );
-    if (!status || seen.has(status)) return;
-    seen.add(status);
-    statuses.push(status);
-  };
-
-  DEFAULT_INTERVIEW_STATUSES.forEach(add);
-  sources.forEach((source) => {
-    if (Array.isArray(source)) source.forEach(add);
-  });
-  return statuses;
-}
-
-function normalizeSavedJd(jd) {
-  const now = new Date().toISOString();
-  return {
-    id: jd?.id || safeId(),
-    name: jd?.name || "未命名 JD",
-    content: jd?.content || "",
-    createdAt: jd?.createdAt || now,
-    updatedAt: jd?.updatedAt || jd?.createdAt || now,
-  };
-}
-
 function extractMarkdownTitle(markdown) {
   const heading = markdown
     .split(/\r?\n/)
@@ -3034,95 +2040,6 @@ function extractMarkdownTitle(markdown) {
     .find((line) => /^#{1,3}\s+/.test(line));
   if (heading) return heading.replace(/^#{1,3}\s+/, "").slice(0, 36);
   return markdown.split(/\r?\n/).find(Boolean)?.trim().slice(0, 36) || "";
-}
-
-function safeId() {
-  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("读取文件失败"));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function serializeResumeFile(file) {
-  if (file.size > MAX_RESUME_FILE_SIZE) {
-    throw new Error("简历文件超过 4MB，当前 MVP 先支持小文件预览");
-  }
-
-  const dataUrl = await readFileAsDataUrl(file);
-  const previewText = await extractDocxPreviewText(file);
-  return {
-    name: file.name,
-    type: file.type || inferFileType(file.name),
-    size: file.size,
-    dataUrl,
-    previewText,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function dataUrlToUint8Array(dataUrl) {
-  const base64 = String(dataUrl).split(",")[1] || "";
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function resumeFileSource(file) {
-  return file?.url || file?.dataUrl || "";
-}
-
-async function extractDocxPreviewText(file) {
-  if (!isDocxFile(file)) return "";
-  try {
-    const mammoth = await import("mammoth");
-    const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-    return result.value.trim();
-  } catch {
-    return "";
-  }
-}
-
-function inferFileType(name) {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".doc")) return "application/msword";
-  if (lower.endsWith(".docx")) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  }
-  return "application/octet-stream";
-}
-
-function isPdfFile(file) {
-  return file?.type === "application/pdf" || file?.name?.toLowerCase().endsWith(".pdf");
-}
-
-function isDocxFile(file) {
-  return (
-    file?.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    file?.name?.toLowerCase().endsWith(".docx")
-  );
-}
-
-function isWordFile(file) {
-  return (
-    isDocxFile(file) ||
-    file?.type === "application/msword" ||
-    file?.name?.toLowerCase().endsWith(".doc")
-  );
-}
-
-function formatFileSize(size = 0) {
-  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))}KB`;
-  return `${(size / 1024 / 1024).toFixed(1)}MB`;
 }
 
 function formatResumeNoteLocation(note) {
@@ -3133,10 +2050,6 @@ function formatResumeNoteLocation(note) {
     return `文档位置 · ${Math.round(note.y * 100)}%`;
   }
   return `原位置 · ${Math.round(note.y * 100)}%`;
-}
-
-function clampNumber(value, min, max) {
-  return Math.min(max, Math.max(min, value));
 }
 
 function loadWorkspaceSplit() {
@@ -3173,13 +2086,6 @@ function saveUiPreferences(patch) {
   }
 }
 
-function normalizeDateValue(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toISOString();
-}
-
 function toDatetimeLocalValue(value) {
   if (!value) return "";
   const date = new Date(value);
@@ -3199,86 +2105,6 @@ function formatDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleString();
-}
-
-function mergeTranscriptLines(prev, incoming) {
-  const seen = new Set(prev.map((line) => line.id));
-  const next = [...prev];
-  for (const item of incoming) {
-    const id = [
-      item.runId || "run",
-      item.speaker || "na",
-      item.startTime ?? "x",
-      item.endTime ?? "x",
-      item.text,
-    ].join(":");
-    if (seen.has(id) || !item.text?.trim()) continue;
-    seen.add(id);
-    next.push({
-      id,
-      runId: item.runId || "",
-      text: item.text.trim(),
-      startTime: item.startTime,
-      endTime: item.endTime,
-      speaker: item.speaker ? String(item.speaker) : "",
-    });
-  }
-  return next;
-}
-
-function formatLineForPrompt(line, speakerLabels) {
-  const speaker = line.speaker
-    ? speakerLabels[line.speaker] || `说话人 ${line.speaker}`
-    : "转录";
-  return `[${speaker}] ${line.text}`;
-}
-
-function resampleTo16k(input, inputSampleRate) {
-  if (inputSampleRate === SAMPLE_RATE) return input;
-  const ratio = inputSampleRate / SAMPLE_RATE;
-  const outputLength = Math.floor(input.length / ratio);
-  const output = new Float32Array(outputLength);
-  for (let i = 0; i < outputLength; i += 1) {
-    const sourceIndex = i * ratio;
-    const left = Math.floor(sourceIndex);
-    const right = Math.min(left + 1, input.length - 1);
-    const weight = sourceIndex - left;
-    output[i] = input[left] * (1 - weight) + input[right] * weight;
-  }
-  return output;
-}
-
-function floatTo16BitPcm(float32Array) {
-  const buffer = new ArrayBuffer(float32Array.length * 2);
-  const view = new DataView(buffer);
-  for (let i = 0; i < float32Array.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, float32Array[i]));
-    view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-  }
-  return buffer;
-}
-
-function extractQuestionLikeLines(text) {
-  return text
-    .split(/\r?\n|。|？|\?/)
-    .map((line) => line.replace(/^\[[^\]]+\]\s*/, "").trim())
-    .filter((line) => /问|介绍|说一下|讲一下|解释|为什么|怎么|多少|哪些/.test(line))
-    .slice(-8);
-}
-
-function mergeQuestions(prev, incoming) {
-  const next = [...prev];
-  for (const question of incoming) {
-    const normalized = question.trim();
-    if (!normalized) continue;
-    if (next.some((item) => similarityKey(item) === similarityKey(normalized))) continue;
-    next.push(normalized);
-  }
-  return next.slice(-80);
-}
-
-function similarityKey(text) {
-  return text.replace(/\s+/g, "").replace(/[，。？！?.,]/g, "").slice(0, 48);
 }
 
 function summarizeCard(markdown) {

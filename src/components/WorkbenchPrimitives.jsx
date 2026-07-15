@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 export function PanelTitle({ icon, title, children }) {
   return (
     <div className="panel-title">
@@ -13,7 +15,7 @@ export function StatusPill({ health }) {
   return <span className={`pill ${ready ? "ready" : "warn"}`}>{ready ? "已配置" : "待配置"}</span>;
 }
 
-export function TranscriptLine({ line, speakerLabels, processed }) {
+export const TranscriptLine = memo(function TranscriptLine({ line, speakerLabels, processed }) {
   const label = line.speaker ? speakerLabels[line.speaker] || `说话人 ${line.speaker}` : "转录";
   return (
     <div className={`line ${processed ? "processed" : ""}`}>
@@ -24,7 +26,7 @@ export function TranscriptLine({ line, speakerLabels, processed }) {
       <div className="line-text">{line.text}</div>
     </div>
   );
-}
+});
 
 function formatMs(ms) {
   const totalSeconds = Math.floor(ms / 1000);
