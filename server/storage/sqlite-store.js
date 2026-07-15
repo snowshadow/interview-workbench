@@ -21,6 +21,7 @@ export class SqliteStore {
     fs.mkdirSync(config.attachmentDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(config.backupDir, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(config.databaseFile);
+    this.transactionDepth = 0;
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     this.createSchema();
     this.migrateLegacyStore();
@@ -791,7 +792,25 @@ export class SqliteStore {
   }
 
   transaction(callback) {
+    // Reentrant: nested calls run inside a savepoint so an inner failure
+    // rolls back only its own writes without aborting the outer transaction.
+    if (this.transactionDepth > 0) {
+      const savepoint = `sp_${this.transactionDepth}`;
+      this.db.exec(`SAVEPOINT ${savepoint}`);
+      this.transactionDepth += 1;
+      try {
+        const result = callback();
+        this.db.exec(`RELEASE ${savepoint}`);
+        return result;
+      } catch (error) {
+        this.db.exec(`ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+        throw error;
+      } finally {
+        this.transactionDepth -= 1;
+      }
+    }
     this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth = 1;
     try {
       const result = callback();
       this.db.exec("COMMIT");
@@ -799,6 +818,8 @@ export class SqliteStore {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.transactionDepth = 0;
     }
   }
 

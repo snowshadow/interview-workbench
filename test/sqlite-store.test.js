@@ -232,6 +232,30 @@ test("getStore inlines transcript only for the active interview", () => {
   }
 });
 
+test("nested transactions roll back only the inner savepoint", () => {
+  const config = createTestConfig();
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    const result = store.transaction(() => {
+      store.createInterview(sampleInterview({ id: "candidate-1", activate: true }));
+      assert.throws(
+        () => store.transaction(() => {
+          store.createInterview(sampleInterview({ id: "candidate-2", name: "会被回滚", lines: [] }));
+          throw new Error("inner failure");
+        }),
+        /inner failure/,
+      );
+      return store.getStore();
+    });
+    assert.equal(result.interviews.length, 1);
+    assert.equal(store.getInterview("candidate-1").id, "candidate-1");
+    assert.equal(store.getInterview("candidate-2"), null);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
 test("patchInterview never rewinds the analysis cursor", () => {
   const config = createTestConfig();
   const store = new SqliteStore(config, silentLogger);

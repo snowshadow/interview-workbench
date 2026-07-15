@@ -9,9 +9,10 @@ import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createSecurity } from "./security.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
-import { OpenAiCompatibleLlmProvider } from "./providers/llm/openai-compatible.js";
+import { createLlmProvider } from "./providers/llm/index.js";
 import { createAsrProvider } from "./providers/asr/index.js";
 import { AnalysisJobService } from "./services/analysis-job-service.js";
+import { createInterviewAnalyzer } from "./services/interview-analysis.js";
 import { extractWordPreviewText, isWordAttachment } from "./services/resume-preview.js";
 import {
   buildEffectiveProviderConfig,
@@ -28,11 +29,11 @@ const storeRepository = new SqliteStore(config, logger);
 const baseProviderConfig = structuredClone({ asr: config.asr, llm: config.llm });
 let storedProviderSettings = storeRepository.getProviderSettings();
 applyEffectiveProviderConfig();
-const llmProvider = new OpenAiCompatibleLlmProvider(config.llm);
+const llmProvider = createLlmProvider(config.llm);
 const asrProvider = createAsrProvider(config.asr, logger);
 const analysisJobService = new AnalysisJobService({
   store: storeRepository,
-  provider: llmProvider,
+  provider: createInterviewAnalyzer(llmProvider),
   logger,
 });
 const PORT = config.port;

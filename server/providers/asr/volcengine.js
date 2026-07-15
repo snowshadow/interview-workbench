@@ -258,11 +258,13 @@ export function buildFullClientRequest() {
 }
 
 export function buildAudioRequest(audioBuffer, isFinal) {
+  // PCM 帧每 100ms 一发且几乎不可压缩，逐帧 gzip 只浪费 CPU；
+  // 协议头按消息声明压缩方式，音频帧走 0x0（不压缩）。
   return buildClientMessage({
     messageType: 0x2,
     flags: isFinal ? 0x2 : 0x0,
     serialization: 0x0,
-    compression: 0x1,
+    compression: 0x0,
     payload: audioBuffer,
   });
 }

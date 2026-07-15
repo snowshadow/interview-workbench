@@ -26,6 +26,14 @@ test("final audio frame uses the protocol final flag", () => {
   assert.equal(final[1] & 0x0f, 2);
 });
 
+test("audio frames carry raw PCM without per-frame compression", () => {
+  const pcm = Buffer.from([1, 2, 3, 4]);
+  const frame = buildAudioRequest(pcm, false);
+  assert.equal(frame[2] & 0x0f, 0x0);
+  assert.equal(frame.readUInt32BE(4), pcm.length);
+  assert.deepEqual(frame.subarray(8), pcm);
+});
+
 test("ASR transcript normalization accepts speaker IDs from additions", () => {
   const normalized = normalizeAsrResult({
     result: {

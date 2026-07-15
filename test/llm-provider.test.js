@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   buildInterviewPrompt,
   sanitizeAnalysisMarkdown,
-} from "../server/providers/llm/openai-compatible.js";
+} from "../server/services/interview-analysis.js";
 
 test("prompt treats candidate materials as bounded data", () => {
   const prompt = buildInterviewPrompt({
