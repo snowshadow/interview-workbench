@@ -1518,7 +1518,9 @@ function App() {
           <Radio size={21} />
           <div>
             <h1>面试工作台</h1>
-            <p>{statusLabel(status, isPaused)}</p>
+            <p className={`session-state state-${status}${isPaused ? " state-paused" : ""}`}>
+              {statusLabel(status, isPaused)}
+            </p>
           </div>
         </div>
 
@@ -1699,7 +1701,7 @@ function App() {
                 {isPaused ? <Play size={17} /> : <Pause size={17} />}
                 {isPaused ? "继续" : "暂停"}
               </button>
-              <button onClick={stopInterview} title="结束面试">
+              <button className="stop-action" onClick={stopInterview} title="结束面试">
                 <Square size={16} />
                 结束
               </button>
