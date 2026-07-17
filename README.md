@@ -2,7 +2,7 @@
 
 一个本地优先的实时面试辅助工具。它把浏览器采集的麦克风和会议声音发送给流式语音识别服务，在本机保存转录、简历、备注和面试场次；面试官可以随时提交最新一段转录，让大模型生成简短的**犀利追问**和**查漏提醒**。
 
-![面试工作台界面](docs/assets/interview-workbench.webp)
+![面试工作台界面](docs/assets/interview-workbench-macos.webp)
 
 工作台也可以通过 MCP 与 Codex、Claude Code、WorkBuddy 等 AI 编程助手联动：AI 读取本机场次，完成简历筛选、面试准备、创建面试和面试总结，再把 Markdown 产物写回同一场次，面试结束后不需要手动导出转录。
 
