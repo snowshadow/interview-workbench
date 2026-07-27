@@ -85,7 +85,7 @@ function currentHealth() {
     asrProvider: config.asr.provider,
     asrResourceId: config.asr.resourceId,
     storage: "sqlite",
-    schemaVersion: 3,
+    schemaVersion: 4,
     accessMode: config.accessToken ? "token" : "local-only",
     issues: [
       ...(!asrConfigured ? ["ASR_NOT_CONFIGURED"] : []),
@@ -336,6 +336,15 @@ app.post("/api/status-options", (req, res) => {
   if (!value || value.length > 24) return res.status(400).json({ error: "状态名称无效" });
   storeRepository.addStatus(value);
   res.status(201).json({ value });
+});
+
+app.put("/api/status-options", (req, res) => {
+  try {
+    const status = storeRepository.setStatusColor(req.body?.value, req.body?.color);
+    res.json(status);
+  } catch (error) {
+    res.status(400).json({ error: error.message || "状态颜色保存失败" });
+  }
 });
 
 app.post("/api/analyze-jobs", (req, res) => {

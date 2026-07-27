@@ -3,15 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const DEFAULT_STATUSES = [
-  "未面",
-  "已安排",
-  "面试中",
-  "已面待定",
-  "一面通过",
-  "未通过",
-  "放弃/归档",
+const STATUS_COLORS = new Set(["gray", "blue", "green", "amber", "red", "purple"]);
+const DEFAULT_STATUS_OPTIONS = [
+  { value: "未面", color: "gray" },
+  { value: "已安排", color: "amber" },
+  { value: "面试中", color: "blue" },
+  { value: "已面待定", color: "gray" },
+  { value: "一面通过", color: "green" },
+  { value: "未通过", color: "red" },
+  { value: "放弃/归档", color: "red" },
 ];
+const DEFAULT_STATUSES = DEFAULT_STATUS_OPTIONS.map(({ value }) => value);
 
 export class SqliteStore {
   constructor(config, logger) {
@@ -42,6 +44,7 @@ export class SqliteStore {
       );
       CREATE TABLE IF NOT EXISTS status_options (
         value TEXT PRIMARY KEY,
+        color TEXT NOT NULL DEFAULT '',
         sort_order INTEGER NOT NULL,
         created_at TEXT NOT NULL
       );
@@ -164,8 +167,14 @@ export class SqliteStore {
         updated_at TEXT NOT NULL
       );
     `);
-    this.setMeta("schema_version", "3");
-    DEFAULT_STATUSES.forEach((status, index) => this.addStatus(status, index));
+    const statusColumns = this.db.prepare("PRAGMA table_info(status_options)").all();
+    if (!statusColumns.some((column) => column.name === "color")) {
+      this.db.exec("ALTER TABLE status_options ADD COLUMN color TEXT NOT NULL DEFAULT ''");
+    }
+    this.setMeta("schema_version", "4");
+    DEFAULT_STATUS_OPTIONS.forEach(({ value, color }, index) =>
+      this.addStatus(value, index, color),
+    );
   }
 
   migrateLegacyStore() {
@@ -207,18 +216,23 @@ export class SqliteStore {
         includeLines: includeAllLines || row.id === activeInterviewId,
       }),
     );
+    const statusRows = this.db
+      .prepare("SELECT value, color FROM status_options ORDER BY sort_order, created_at")
+      .all();
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       activeInterviewId,
       interviews,
       jdLibrary: this.db
         .prepare("SELECT * FROM jd_library ORDER BY updated_at DESC")
         .all()
         .map(mapJd),
-      statusOptions: this.db
-        .prepare("SELECT value FROM status_options ORDER BY sort_order, created_at")
-        .all()
-        .map((row) => row.value),
+      statusOptions: statusRows.map((row) => row.value),
+      statusColors: Object.fromEntries(
+        statusRows
+          .map((row) => [row.value, normalizeStatusColor(row.color)])
+          .filter(([, color]) => color),
+      ),
     };
   }
 
@@ -231,6 +245,8 @@ export class SqliteStore {
     }
     for (const [index, status] of normalizeStatuses(store?.statusOptions, interviews).entries()) {
       this.addStatus(status, index);
+      const color = normalizeStatusColor(store?.statusColors?.[status]);
+      if (color) this.setStatusColor(status, color);
     }
     for (const jd of Array.isArray(store?.jdLibrary) ? store.jdLibrary : []) this.upsertJd(jd);
     for (const interview of interviews) this.upsertInterviewSnapshot(interview);
@@ -520,12 +536,32 @@ export class SqliteStore {
     return value;
   }
 
-  addStatus(status, sortOrder = null) {
+  addStatus(status, sortOrder = null, color = "") {
     const value = cleanText(status, 24);
     if (!value) return;
+    const normalizedColor = normalizeStatusColor(color);
     const order = sortOrder ?? this.db.prepare("SELECT COUNT(*) AS count FROM status_options").get().count;
-    this.db.prepare("INSERT OR IGNORE INTO status_options (value, sort_order, created_at) VALUES (?, ?, ?)")
-      .run(value, order, new Date().toISOString());
+    this.db.prepare(`
+      INSERT OR IGNORE INTO status_options (value, color, sort_order, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(value, normalizedColor, order, new Date().toISOString());
+    if (normalizedColor) {
+      this.db.prepare(`
+        UPDATE status_options SET color = ?
+        WHERE value = ? AND color = ''
+      `).run(normalizedColor, value);
+    }
+  }
+
+  setStatusColor(status, color) {
+    const value = cleanText(status, 24);
+    const normalizedColor = normalizeStatusColor(color);
+    if (!value) throw new Error("状态名称无效");
+    if (!normalizedColor) throw new Error("状态颜色无效");
+    this.addStatus(value);
+    this.db.prepare("UPDATE status_options SET color = ? WHERE value = ?")
+      .run(normalizedColor, value);
+    return { value, color: normalizedColor };
   }
 
   upsertArtifact(interviewId, artifact) {
@@ -1200,6 +1236,10 @@ function cleanId(value) {
 
 function cleanSlug(value, maxLength) {
   return cleanText(value, maxLength).toLowerCase().replace(/[^a-z0-9._-]/g, "");
+}
+
+function normalizeStatusColor(value) {
+  return STATUS_COLORS.has(value) ? value : "";
 }
 
 function artifactTitle(kind) {

@@ -1,5 +1,9 @@
 import { requestJson } from "../api.js";
-import { inferInterviewStatus, normalizeStatusLabel } from "../interview-domain.js";
+import {
+  inferInterviewStatus,
+  normalizeStatusColor,
+  normalizeStatusLabel,
+} from "../interview-domain.js";
 
 export const STORE_KEY = "interview-workbench.sessions.v1";
 export const DEFAULT_INTERVIEW_STATUSES = [
@@ -91,6 +95,7 @@ export function normalizeStore(store) {
       ? store.jdLibrary.map(normalizeSavedJd)
       : [],
     statusOptions: mergeStatusOptions(store?.statusOptions, nextInterviews),
+    statusColors: normalizeStatusColors(store?.statusColors),
   };
 }
 
@@ -167,6 +172,18 @@ export function mergeStatusOptions(...sources) {
     if (Array.isArray(source)) source.forEach(add);
   });
   return statuses;
+}
+
+export function normalizeStatusColors(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([status, color]) => [
+        normalizeStatusLabel(status),
+        normalizeStatusColor(color),
+      ])
+      .filter(([status, color]) => status && color),
+  );
 }
 
 export function normalizeSavedJd(jd) {

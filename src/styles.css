@@ -476,6 +476,11 @@ h1 {
   color: var(--warning);
 }
 
+.session-status.purple {
+  background: light-dark(rgba(175, 82, 222, 0.11), rgba(191, 90, 242, 0.17));
+  color: light-dark(#8f3eb5, #bf5af2);
+}
+
 /* —— 状态选择弹层 —— */
 .status-picker {
   position: relative;
@@ -506,6 +511,10 @@ button.status-picker-trigger.active:hover:not(:disabled) {
 
 button.status-picker-trigger.scheduled:hover:not(:disabled) {
   background: var(--warning-soft);
+}
+
+button.status-picker-trigger.purple:hover:not(:disabled) {
+  background: light-dark(rgba(175, 82, 222, 0.11), rgba(191, 90, 242, 0.17));
 }
 
 .status-picker-popover {
@@ -562,6 +571,72 @@ button.status-picker-trigger.scheduled:hover:not(:disabled) {
   min-width: 30px;
   min-height: 28px;
   padding: 0;
+}
+
+.status-color-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.status-color-field > span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.status-color-swatches {
+  display: flex;
+  gap: 5px;
+}
+
+.status-color-swatch {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 2px solid var(--material-popover);
+  border-radius: 50%;
+  background: var(--status-swatch);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-swatch) 28%, transparent);
+  cursor: pointer;
+}
+
+.status-color-swatch:hover {
+  transform: scale(1.08);
+}
+
+.status-color-swatch[aria-pressed="true"] {
+  box-shadow:
+    0 0 0 1px var(--material-popover),
+    0 0 0 3px var(--status-swatch);
+}
+
+.status-color-swatch.color-gray {
+  --status-swatch: #8e8e93;
+}
+
+.status-color-swatch.color-blue {
+  --status-swatch: #0a84ff;
+}
+
+.status-color-swatch.color-green {
+  --status-swatch: #34c759;
+}
+
+.status-color-swatch.color-amber {
+  --status-swatch: #ff9f0a;
+}
+
+.status-color-swatch.color-red {
+  --status-swatch: #ff453a;
+}
+
+.status-color-swatch.color-purple {
+  --status-swatch: #af52de;
 }
 
 /* —— 右侧操作区 —— */

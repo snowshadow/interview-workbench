@@ -44,6 +44,8 @@ import {
   inferInterviewStatus,
   interviewStatusTone,
   normalizeStatusLabel,
+  STATUS_COLOR_OPTIONS,
+  statusColorFor,
 } from "./interview-domain.js";
 import {
   ApiError,
@@ -444,7 +446,7 @@ function App() {
     metadataPersistTimersRef.current.set(interview.id, timer);
   }
 
-  function applyActiveInterviewStatus(value) {
+  function applyActiveInterviewStatus(value, { keepPickerOpen = false } = {}) {
     const nextStatus = normalizeStatusLabel(value);
     if (!nextStatus) return;
     setStore((prev) => {
@@ -460,11 +462,28 @@ function App() {
       };
     });
     setCustomStatusDraft("");
-    setStatusPickerOpen(false);
+    setStatusPickerOpen(keepPickerOpen);
     requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}`, {
       method: "PATCH",
       body: JSON.stringify({ interviewStatus: nextStatus }),
     }).catch(() => setPersistError("面试状态保存失败"));
+  }
+
+  function applyStatusColor(color) {
+    const statusLabel = normalizeStatusLabel(interviewStatus);
+    if (!statusLabel) return;
+    setStore((prev) => ({
+      ...prev,
+      statusColors: {
+        ...prev.statusColors,
+        [statusLabel]: color,
+      },
+    }));
+    setStatusPickerOpen(false);
+    requestJson("/api/status-options", {
+      method: "PUT",
+      body: JSON.stringify({ value: statusLabel, color }),
+    }).catch(() => setPersistError("标签颜色保存失败"));
   }
 
   async function appendTranscriptLines(interviewId, nextLines) {
@@ -1535,6 +1554,7 @@ function App() {
               <button
                 className={`session-status status-picker-trigger ${interviewStatusTone(
                   interviewStatus,
+                  store.statusColors,
                 )}`}
                 disabled={!canSwitchInterview}
                 onClick={() => setStatusPickerOpen((open) => !open)}
@@ -1547,7 +1567,10 @@ function App() {
                   <div className="status-picker-options">
                     {statusOptions.map((statusOption) => (
                       <button
-                        className={`session-status ${interviewStatusTone(statusOption)} ${
+                        className={`session-status ${interviewStatusTone(
+                          statusOption,
+                          store.statusColors,
+                        )} ${
                           statusOption === interviewStatus ? "selected" : ""
                         }`}
                         key={statusOption}
@@ -1562,7 +1585,7 @@ function App() {
                     className="status-picker-custom"
                     onSubmit={(event) => {
                       event.preventDefault();
-                      applyActiveInterviewStatus(customStatusDraft);
+                      applyActiveInterviewStatus(customStatusDraft, { keepPickerOpen: true });
                     }}
                   >
                     <input
@@ -1582,6 +1605,24 @@ function App() {
                       <Plus size={15} />
                     </button>
                   </form>
+                  <div className="status-color-field">
+                    <span>标签颜色</span>
+                    <div className="status-color-swatches" role="group" aria-label="标签颜色">
+                      {STATUS_COLOR_OPTIONS.map((option) => (
+                        <button
+                          aria-label={option.label}
+                          aria-pressed={
+                            statusColorFor(interviewStatus, store.statusColors) === option.value
+                          }
+                          className={`status-color-swatch color-${option.value}`}
+                          key={option.value}
+                          onClick={() => applyStatusColor(option.value)}
+                          title={option.label}
+                          type="button"
+                        />
+                      ))}
+                    </div>
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -1767,6 +1808,7 @@ function App() {
           interviews={store.interviews}
           onClose={() => setSessionLibraryOpen(false)}
           onSelect={switchInterview}
+          statusColors={store.statusColors}
           statusOptions={statusOptions}
         />
       ) : null}
@@ -2070,6 +2112,7 @@ function loadInterviewStore() {
     activeInterviewId: interview.id,
     interviews: [interview],
     jdLibrary: [],
+    statusColors: {},
     statusOptions: [...DEFAULT_INTERVIEW_STATUSES],
   };
 }

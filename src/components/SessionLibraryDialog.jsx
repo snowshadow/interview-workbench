@@ -13,6 +13,7 @@ export function SessionLibraryDialog({
   interviews,
   onClose,
   onSelect,
+  statusColors,
   statusOptions,
 }) {
   const [query, setQuery] = useState("");
@@ -79,7 +80,7 @@ export function SessionLibraryDialog({
             >
               <span className="session-row-name">{interview.name || "未命名面试"}</span>
               <span className="session-row-role">{getInterviewRole(interview)}</span>
-              <span className={`session-status ${interviewStatusTone(status)}`}>{status}</span>
+              <span className={`session-status ${interviewStatusTone(status, statusColors)}`}>{status}</span>
               <span className="session-row-time">{formatShortDateTime(interview.scheduledAt) || "未安排时间"}</span>
             </button>;
           }) : <div className="session-library-empty">没有符合条件的场次</div>}

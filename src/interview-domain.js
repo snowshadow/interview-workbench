@@ -3,6 +3,42 @@ export function normalizeStatusLabel(value) {
   return value.trim().replace(/\s+/g, " ").slice(0, 24);
 }
 
+export const STATUS_COLOR_OPTIONS = [
+  { value: "gray", label: "灰色" },
+  { value: "blue", label: "蓝色" },
+  { value: "green", label: "绿色" },
+  { value: "amber", label: "黄色" },
+  { value: "red", label: "红色" },
+  { value: "purple", label: "紫色" },
+];
+
+const STATUS_COLOR_TONES = {
+  gray: "neutral",
+  blue: "active",
+  green: "success",
+  amber: "scheduled",
+  red: "negative",
+  purple: "purple",
+};
+
+const DEFAULT_STATUS_COLORS = {
+  未面: "gray",
+  已安排: "amber",
+  面试中: "blue",
+  已面待定: "gray",
+  一面通过: "green",
+  未通过: "red",
+  "放弃/归档": "red",
+};
+
+export function normalizeStatusColor(value) {
+  return STATUS_COLOR_TONES[value] ? value : "";
+}
+
+export function statusColorFor(status, statusColors = {}) {
+  return normalizeStatusColor(statusColors?.[status]) || DEFAULT_STATUS_COLORS[status] || "gray";
+}
+
 export function inferInterviewStatus(interview) {
   return interview?.lines?.length ||
     interview?.transcriptLineCount ||
@@ -29,12 +65,8 @@ export function getInterviewRole(interview) {
   return interview?.jdDraftName?.trim() || "未设置岗位";
 }
 
-export function interviewStatusTone(status) {
-  if (status === "一面通过") return "success";
-  if (["未通过", "放弃/归档"].includes(status)) return "negative";
-  if (status === "面试中") return "active";
-  if (status === "已安排") return "scheduled";
-  return "neutral";
+export function interviewStatusTone(status, statusColors = {}) {
+  return STATUS_COLOR_TONES[statusColorFor(status, statusColors)] || "neutral";
 }
 
 export function compareInterviews(left, right, sortBy) {
