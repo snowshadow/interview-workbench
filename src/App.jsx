@@ -16,7 +16,6 @@ import {
   Pencil,
   Play,
   Plus,
-  Radio,
   RefreshCw,
   Settings,
   Square,
@@ -1534,7 +1533,7 @@ function App() {
     <main className="app">
       <header className="topbar">
         <div className="brand">
-          <Radio size={21} />
+          <img className="brand-icon" src="/favicon.png" alt="" aria-hidden="true" />
           <div>
             <h1>面试工作台</h1>
             <p className={`session-state state-${status}${isPaused ? " state-paused" : ""}`}>
