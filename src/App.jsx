@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   BriefcaseBusiness,
   CalendarClock,
+  CalendarDays,
   Download,
   Ellipsis,
   FileText,
@@ -28,6 +29,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import "./styles.css";
+import { InterviewCalendarDialog } from "./components/InterviewCalendarDialog.jsx";
 import { SessionLibraryDialog } from "./components/SessionLibraryDialog.jsx";
 import { PanelTitle, StatusPill } from "./components/WorkbenchPrimitives.jsx";
 import { TranscriptPanel } from "./components/TranscriptPanel.jsx";
@@ -89,6 +91,10 @@ import {
   serializeResumeFile,
 } from "./lib/resume-files.js";
 import { clampNumber } from "./lib/format.js";
+import {
+  buildInterviewIcs,
+  calendarExportFilename,
+} from "./lib/calendar.js";
 
 if (!Promise.withResolvers) {
   Promise.withResolvers = function withResolvers() {
@@ -115,6 +121,7 @@ function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [hasPartialText, setHasPartialText] = useState(false);
   const [error, setError] = useState("");
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [sessionLibraryOpen, setSessionLibraryOpen] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [interviewForm, setInterviewForm] = useState(null);
@@ -1644,6 +1651,14 @@ function App() {
           </button>
           <button
             disabled={!canSwitchInterview}
+            onClick={() => setCalendarOpen(true)}
+            title="预览面试安排"
+          >
+            <CalendarDays size={17} />
+            日历
+          </button>
+          <button
+            disabled={!canSwitchInterview}
             onClick={() => setSessionLibraryOpen(true)}
             title="浏览和筛选场次"
           >
@@ -1809,6 +1824,15 @@ function App() {
           onSelect={switchInterview}
           statusColors={store.statusColors}
           statusOptions={statusOptions}
+        />
+      ) : null}
+
+      {calendarOpen ? (
+        <InterviewCalendarDialog
+          interviews={store.interviews}
+          onClose={() => setCalendarOpen(false)}
+          onSync={syncInterviewToSystemCalendar}
+          statusColors={store.statusColors}
         />
       ) : null}
 
@@ -2133,6 +2157,32 @@ function formatResumeNoteLocation(note) {
     return `文档位置 · ${Math.round(note.y * 100)}%`;
   }
   return `原位置 · ${Math.round(note.y * 100)}%`;
+}
+
+async function syncInterviewToSystemCalendar(interview) {
+  try {
+    return await requestJson(
+      `/api/interviews/${encodeURIComponent(interview.id)}/calendar-import`,
+      { method: "POST" },
+    );
+  } catch {
+    downloadInterviewCalendar(interview);
+    return { ok: true, action: "downloaded" };
+  }
+}
+
+function downloadInterviewCalendar(interview) {
+  const blob = new Blob([buildInterviewIcs(interview)], {
+    type: "text/calendar;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = calendarExportFilename(interview);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function loadWorkspaceSplit() {
