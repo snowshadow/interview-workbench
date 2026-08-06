@@ -15,6 +15,10 @@ import { AnalysisJobService } from "./services/analysis-job-service.js";
 import { createInterviewAnalyzer } from "./services/interview-analysis.js";
 import { extractWordPreviewText, isWordAttachment } from "./services/resume-preview.js";
 import {
+  isLoopbackRequest,
+  openInterviewInSystemCalendar,
+} from "./services/calendar-export.js";
+import {
   buildEffectiveProviderConfig,
   normalizeProviderSettingsPatch,
   publicProviderSettings,
@@ -153,6 +157,34 @@ app.get("/api/interviews/:interviewId", (req, res) => {
   const interview = storeRepository.getInterview(req.params.interviewId);
   if (!interview) return res.status(404).json({ error: "面试场次不存在" });
   res.json({ interview });
+});
+
+app.post("/api/interviews/:interviewId/calendar-import", async (req, res) => {
+  const interview = storeRepository.getInterview(req.params.interviewId);
+  if (!interview) return res.status(404).json({ error: "面试场次不存在" });
+  if (!interview.scheduledAt) return res.status(400).json({ error: "这场面试还没有安排时间" });
+  if (!isLoopbackRequest(req)) {
+    return res.status(409).json({ error: "远程访问时请下载日历文件后手动导入" });
+  }
+
+  try {
+    const result = await openInterviewInSystemCalendar({
+      interview,
+      exportDir: path.join(config.dataDir, "calendar-exports"),
+    });
+    appendServerLog("calendar_import.opened", {
+      interviewId: interview.id,
+      filename: result.filename,
+    });
+    res.json({ ok: true, action: "opened" });
+  } catch (error) {
+    appendServerLog("calendar_import.failed", {
+      interviewId: interview.id,
+      error: serializeError(error),
+    });
+    const statusCode = error.code === "CALENDAR_OPEN_UNSUPPORTED" ? 409 : 500;
+    res.status(statusCode).json({ error: error.message || "打开系统日历失败" });
+  }
 });
 
 app.put("/api/interviews/:interviewId/active", (req, res) => {
