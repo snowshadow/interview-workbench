@@ -41,6 +41,13 @@ export class AnalysisJobService {
       segmentStart,
       interview.lines.length,
     );
+    const preparationArtifact = interview.artifacts?.find(
+      (artifact) => artifact.kind === "interview-preparation",
+    );
+    const persistedCards = (interview.cards || [])
+      .filter((item) => item.status === "done" && item.markdown)
+      .slice(0, 5)
+      .map((item) => item.markdown);
     const idempotencyKey = input.idempotencyKey || createIdempotencyKey(
       input.interviewId,
       segmentStart,
@@ -61,10 +68,19 @@ export class AnalysisJobService {
         segmentStart,
         segmentEnd,
         resumeMarkdown: boundedText(input.resumeMarkdown, 80000),
+        outlineMarkdown: boundedText(
+          preparationArtifact?.markdown || input.resumeMarkdown || interview.resumeMarkdown,
+          100000,
+        ),
         roleMarkdown: boundedText(input.roleMarkdown, 80000),
+        transcriptContext: buildTranscriptContext(interview, segmentStart, 60000),
         transcriptSlice,
         askedQuestions: boundedList(input.askedQuestions, 200, 500),
-        previousCards: boundedList(input.previousCards, 10, 1000),
+        previousCards: boundedList(
+          persistedCards.length ? persistedCards : input.previousCards,
+          5,
+          1200,
+        ),
       },
       idempotencyKey,
       maxAttempts: this.maxAttempts,
@@ -209,4 +225,19 @@ function boundedInteger(value, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return min;
   return Math.max(min, Math.min(max, Math.trunc(number)));
+}
+
+function buildTranscriptContext(interview, segmentStart, maxLength) {
+  const labels = interview.speakerLabels || {};
+  const text = (interview.lines || [])
+    .slice(0, segmentStart)
+    .map((line) => {
+      const speaker = line.speaker
+        ? labels[line.speaker] || `说话人 ${line.speaker}`
+        : "转录";
+      return `[${speaker}] ${String(line.text || "").trim()}`;
+    })
+    .filter((line) => line.trim())
+    .join("\n");
+  return text.slice(-maxLength);
 }
