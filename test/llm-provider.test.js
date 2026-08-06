@@ -18,22 +18,34 @@ test("prompt treats candidate materials as bounded data", () => {
   assert.ok(prompt.length < 170000);
 });
 
-test("analysis output keeps only the two supported Markdown sections", () => {
+test("analysis output keeps pending questions and at most one worthwhile followup", () => {
   const sanitized = sanitizeAnalysisMarkdown(`
 <script>alert(1)</script>
-## 犀利追问
+## 当前值得追问
 - [你的指标是什么？](https://evil.example)
 - 第二个问题？
-- 第三个问题？
-- 不应保留
-## 查漏
+## 待问关键问题
 - 失败恢复
+- 个人贡献边界
 ![image](https://evil.example/image.png)
 ## 额外标题
 - 不应保留
 `);
   assert.equal(sanitized.includes("http"), false);
   assert.equal(sanitized.includes("script"), false);
-  assert.equal((sanitized.match(/^- /gm) || []).length, 4);
-  assert.ok(sanitized.includes("还没问：失败恢复"));
+  assert.equal((sanitized.match(/^- /gm) || []).length, 3);
+  assert.ok(sanitized.startsWith("## 待问关键问题\n- 失败恢复"));
+  assert.ok(sanitized.includes("## 当前值得追问\n- 你的指标是什么？"));
+  assert.equal(sanitized.includes("第二个问题"), false);
+});
+
+test("analysis output omits the followup section when the topic is not worth pursuing", () => {
+  const sanitized = sanitizeAnalysisMarkdown(`
+## 待问关键问题
+- 你亲自负责的核心模块是什么？
+## 当前值得追问
+- 不值得追问：当前话题与岗位无关
+`);
+  assert.equal(sanitized.includes("当前值得追问"), false);
+  assert.equal(sanitized.includes("不值得追问"), false);
 });
