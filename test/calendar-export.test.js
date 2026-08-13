@@ -25,16 +25,18 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
       name: "林,嘉",
       jdDraftName: "Agent;工程师",
       scheduledAt: "2026-07-12T02:00:00.000Z",
+      roundStatus: "已安排",
     }),
     new Date("2026-07-10T08:30:00.000Z"),
   );
+  const unfoldedContent = content.replace(/\r\n /g, "");
 
   assert.match(content, /UID:interview-candidate-1@lingban-workbench\.local/);
   assert.match(content, /DTSTAMP:20260710T083000Z/);
   assert.match(content, /DTSTART:20260712T020000Z/);
   assert.match(content, /DTEND:20260712T030000Z/);
-  assert.match(content, /SUMMARY:面试 · 林\\,嘉/);
-  assert.match(content, /岗位：Agent\\;工程师\\n状态：已安排/);
+  assert.match(content, /SUMMARY:面试 · 林\\,嘉 · 一面/);
+  assert.match(unfoldedContent, /岗位：Agent\\;工程师\\n轮次：一面\\n轮次状态：已安排/);
   assert.ok(content.endsWith("\r\n"));
 });
 

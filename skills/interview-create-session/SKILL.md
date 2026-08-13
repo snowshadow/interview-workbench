@@ -1,22 +1,29 @@
 ---
 name: interview-create-session
-description: Create an Interview Workbench session from an AI coding harness, including candidate name, status, schedule, JD, preparation notes, resume analysis, and a local PDF/DOC/DOCX resume. Use when the user asks to create, schedule, or register an interview without operating the web UI.
+description: "Create a new Interview Workbench application or add a round to an existing candidate-and-role application, including shared JD and resume evidence plus round-specific schedule, focus, and preparation. Use when the user asks to create, schedule, register, or continue an interview process without operating the web UI."
 ---
 
-# Create Interview Session
+# Create Interview Application or Round
 
-Create the workbench record without asking the user to repeat information already available in files or conversation.
+Use the workbench's **Application → InterviewRound** model. An Application is one candidate's hiring process for one role; each interview is a separate Round inside it.
+
+## Data Boundaries
+
+- Application owns the candidate, target role and JD, shared resume, hiring status, resume screening, and whole-process conclusion.
+- Round owns its label, schedule, lifecycle status, focus, preparation, transcript, AI cards, notes, linked AI sessions, summary, and handoff.
+
+Do not copy Round-owned evidence into a new Round. Cross-round context must come from saved summaries and handoffs.
 
 ## Workflow
 
-1. Resolve the candidate or session name. This is the only required field.
-2. Use the supplied status. Otherwise default to `未面`; a custom status is allowed.
-3. Convert scheduled time to an ISO 8601 value while preserving the user's timezone intent.
-4. Read the target JD and preparation material, then pass their Markdown to `create_interview`.
-5. Pass a local PDF, DOC, or DOCX path as `resumePath` when available.
-6. The MCP server links the current Codex, Claude Code, or WorkBuddy session when its session identifier is available.
-7. If separate screening or preparation reports already exist, save them with `save_interview_artifact` as `resume-screening` and `interview-preparation` after creation.
+1. Resolve the candidate name and target role from the request and available files. Search with `list_applications` before creating anything, then match on **both** candidate and role. Never merge by name alone.
+2. If several Applications or Rounds remain plausible, state the ambiguity and ask for the exact target instead of choosing silently.
+3. For a new hiring process, call `create_interview`. It creates the Application and first Round. Use the supplied hiring status or default to `未面`; the MCP tool keeps the legacy input name `interviewStatus` for this Application-level status. Convert the schedule to ISO 8601 while preserving the user's timezone intent, and pass a local PDF, DOC, or DOCX path as `resumePath` when available.
+4. For another Round in an existing process, first load `get_application_context`, verify the candidate and role, then call `create_interview_round`. Supply only `applicationId`, `roundLabel`, `scheduledAt`, `roundFocus`, and `roundStatus`; do not overwrite Application status, JD, resume, or screening through a Round creation request.
+5. Link the current Codex, Claude Code, or WorkBuddy session to the created Round when its session identifier is available.
+6. Save screening with `save_application_artifact` as `resume-screening`. Save preparation with `save_interview_artifact` as `interview-preparation` on the exact target Round.
+7. Verify the result with `get_application_context` and `get_interview_context`. A newly added Round must start without transcript lines, AI cards, or linked sessions other than the session just linked for this task.
 
-Do not place API keys, access tokens, or private configuration inside the interview record. Do not create duplicate sessions when `list_interviews` shows an obvious exact match; ask before replacing or duplicating it.
+Do not place API keys, access tokens, or private configuration inside the record. Do not create a second Application when an exact candidate-and-role Application already exists unless the user explicitly starts a separate hiring process.
 
-Report the created interview ID, name, status, scheduled time, attachment result, and which artifacts were saved.
+Report the candidate, role, Application ID and status, Round ID and label, schedule, attachment result, and saved artifacts.

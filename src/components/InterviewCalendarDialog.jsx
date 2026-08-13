@@ -18,8 +18,10 @@ import {
 } from "../lib/calendar.js";
 import {
   getInterviewRole,
-  inferInterviewStatus,
+  inferRoundStatus,
   interviewStatusTone,
+  roundDisplayName,
+  roundLabelFor,
 } from "../interview-domain.js";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -86,7 +88,7 @@ export function InterviewCalendarDialog({
   }
 
   const subtitle = entries.length
-    ? `${entries.length} 场已安排${unscheduledCount ? ` · ${unscheduledCount} 场未排期` : ""}`
+    ? `${entries.length} 轮已安排${unscheduledCount ? ` · ${unscheduledCount} 轮未排期` : ""}`
     : "暂无已安排面试";
 
   return (
@@ -369,27 +371,28 @@ function CalendarEventButton({
   style,
   time,
 }) {
-  const status = interview.interviewStatus || inferInterviewStatus(interview);
+  const status = inferRoundStatus(interview);
+  const displayName = roundDisplayName(interview);
   return (
     <button
-      aria-label={`${formatTime(new Date(interview.scheduledAt))} ${interview.name || "未命名面试"}`}
+      aria-label={`${formatTime(new Date(interview.scheduledAt))} ${displayName}`}
       className={`calendar-event ${compact ? "compact" : ""} ${
         isSelected ? "selected" : ""
       } tone-${interviewStatusTone(status, statusColors)}`}
       onClick={onClick}
       style={style}
-      title={`${interview.name || "未命名面试"} · ${getInterviewRole(interview)}`}
+      title={`${displayName} · ${getInterviewRole(interview)}`}
       type="button"
     >
-      {compact ? <span>{time}</span> : <strong>{interview.name || "未命名面试"}</strong>}
-      <span>{compact ? interview.name || "未命名面试" : formatTime(new Date(interview.scheduledAt))}</span>
+      {compact ? <span>{time}</span> : <strong>{displayName}</strong>}
+      <span>{compact ? displayName : formatTime(new Date(interview.scheduledAt))}</span>
     </button>
   );
 }
 
 function EventInspector({ entry, onClose, onSync, statusColors, syncState }) {
   const { interview, date } = entry;
-  const status = interview.interviewStatus || inferInterviewStatus(interview);
+  const status = inferRoundStatus(interview);
   const syncing = syncState?.status === "syncing";
 
   return (
@@ -399,7 +402,7 @@ function EventInspector({ entry, onClose, onSync, statusColors, syncState }) {
           <span className={`session-status ${interviewStatusTone(status, statusColors)}`}>
             {status}
           </span>
-          <h3>{interview.name || "未命名面试"}</h3>
+          <h3>{interview.name || "未命名候选人"} · {roundLabelFor(interview)}</h3>
         </div>
         <button
           aria-label="关闭面试详情"

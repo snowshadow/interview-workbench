@@ -1,6 +1,6 @@
 ---
 name: interview-summary
-description: Produce an evidence-based post-interview hiring report from an Interview Workbench session, integrating the JD, resume analysis, prior screening and preparation artifacts, AI follow-ups, notes, and the full transcript. Use for interview summaries, debriefs, hiring decisions, scores, or when the user wants to avoid manually exporting a transcript.
+description: "Produce an evidence-based report and cross-round handoff for one Interview Workbench round from Application-level evidence, Round preparation, notes, AI follow-ups, and that Round's full transcript. Use for interview summaries, debriefs, scores, next-round handoffs, or an explicitly requested whole-process final conclusion."
 ---
 
 # Interview Summary
@@ -9,11 +9,11 @@ Produce a hiring decision, not a transcript recap. Compare what needed to be pro
 
 ## Source Order
 
-1. Find the exact session with `list_interviews`. Do not guess when multiple candidates match.
-2. Load metadata, JD, resume analysis, notes, AI cards, and saved artifacts with `get_interview_context`.
-3. Read the full transcript using `get_transcript_chunk`. Start at offset `0`, use bounded chunks, and continue with `nextOffset` until it is `null`.
+1. Find the exact hiring process with `list_applications`, matching candidate and role together, then load `get_application_context`. Select the exact Round. Do not guess when multiple Applications or Rounds match.
+2. Load the target Round's label, focus, preparation, notes, AI cards, and artifacts with `get_interview_context`. Use Application-level JD, resume, and screening plus selected prior `round-handoff` and `interview-summary` artifacts for cross-round context.
+3. Read **only the selected Round's** full transcript with `get_transcript_chunk`. Start at offset `0`, use bounded chunks, and follow `nextOffset` until it is `null`. Do not mix another Round's raw transcript into the report.
 4. Treat obvious ASR errors as uncertainty. Never invent missing statements or silently repair facts that affect the decision.
-5. Compare the interview with the JD, `resume-screening`, and `interview-preparation` artifacts. Explicitly call out important areas that were not asked or not answered.
+5. Compare this round with the remaining hiring questions and its `interview-preparation` artifact. Explicitly call out important areas that were not asked or not answered.
 
 ## Judgment
 
@@ -43,4 +43,18 @@ Write in the user's language. Lead with the decision and keep evidence traceable
 **One-line assessment**: ...
 ```
 
-Save the final Markdown with `save_interview_artifact` using kind `interview-summary` and title `Interview summary`. The save replaces the current summary artifact for that interview. Do not update interview status unless the user explicitly confirms the new status.
+Save the report to the target Round with `save_interview_artifact`, kind `interview-summary`, and title `Interview summary`. Save a second Round artifact with kind `round-handoff` and exactly these headings:
+
+```markdown
+## Confirmed evidence
+
+## Unresolved risks
+
+## Contradictions
+
+## Next-round objectives
+```
+
+The handoff, not prior raw transcripts, is the default input to later-round preparation. Verify both saved artifacts before reporting success.
+
+Only when the user explicitly asks for a whole-process or final hiring conclusion, synthesize all Round summaries and save it on the Application with `save_application_artifact`, kind `final-summary`, and title `Final summary`. Do not treat an ordinary Round summary as the whole-process decision, and do not update Application status unless the user explicitly confirms it.

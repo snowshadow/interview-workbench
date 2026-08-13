@@ -14,6 +14,15 @@ const DEFAULT_STATUS_OPTIONS = [
   { value: "放弃/归档", color: "red" },
 ];
 const DEFAULT_STATUSES = DEFAULT_STATUS_OPTIONS.map(({ value }) => value);
+const ROUND_STATUSES = new Set(["待安排", "已安排", "进行中", "已结束", "已取消"]);
+const APPLICATION_CONTEXT_ARTIFACT_KINDS = new Set(["round-handoff", "interview-summary"]);
+const APPLICATION_ARTIFACT_COMPAT_KINDS = new Set([
+  "resume-screening",
+  "process-brief",
+  "application-handoff",
+  "final-summary",
+]);
+const SCHEMA_VERSION = 5;
 
 export class SqliteStore {
   constructor(config, logger) {
@@ -22,9 +31,11 @@ export class SqliteStore {
     fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(config.attachmentDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(config.backupDir, { recursive: true, mode: 0o700 });
+    const databaseExisted = fs.existsSync(config.databaseFile) && fs.statSync(config.databaseFile).size > 0;
     this.db = new DatabaseSync(config.databaseFile);
     this.transactionDepth = 0;
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+    this.backupBeforeApplicationMigration(databaseExisted);
     this.createSchema();
     this.migrateLegacyStore();
     this.recoverInterruptedJobs();
@@ -34,6 +45,29 @@ export class SqliteStore {
 
   close() {
     this.db.close();
+  }
+
+  backupBeforeApplicationMigration(databaseExisted) {
+    if (!databaseExisted) return;
+    const hasMeta = this.db.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
+    `).get();
+    const currentVersion = hasMeta
+      ? Number(this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()?.value || 0)
+      : 0;
+    if (currentVersion >= SCHEMA_VERSION) return;
+    this.db.exec("PRAGMA wal_checkpoint(FULL)");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let target = path.join(this.config.backupDir, `workbench-pre-v5-${timestamp}.sqlite`);
+    if (fs.existsSync(target)) {
+      target = path.join(
+        this.config.backupDir,
+        `workbench-pre-v5-${timestamp}-${crypto.randomUUID().slice(0, 8)}.sqlite`,
+      );
+    }
+    fs.copyFileSync(this.config.databaseFile, target, fs.constants.COPYFILE_EXCL);
+    trySetPrivateMode(target);
+    this.logger?.info?.("store.pre_v5_backup", { target, schemaVersion: currentVersion });
   }
 
   createSchema() {
@@ -55,8 +89,24 @@ export class SqliteStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS applications (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        application_status TEXT NOT NULL,
+        resume_markdown TEXT NOT NULL DEFAULT '',
+        role_markdown TEXT NOT NULL DEFAULT '',
+        resume_notes_json TEXT NOT NULL DEFAULT '[]',
+        selected_jd_id TEXT NOT NULL DEFAULT '',
+        jd_draft_name TEXT NOT NULL DEFAULT '',
+        deleted_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS applications_updated
+        ON applications(updated_at DESC);
       CREATE TABLE IF NOT EXISTS attachments (
         id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL UNIQUE REFERENCES applications(id) ON DELETE CASCADE,
         interview_id TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         type TEXT NOT NULL,
@@ -67,6 +117,12 @@ export class SqliteStore {
       );
       CREATE TABLE IF NOT EXISTS interviews (
         id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+        round_order INTEGER NOT NULL DEFAULT 1,
+        round_label TEXT NOT NULL DEFAULT '',
+        round_status TEXT NOT NULL DEFAULT '待安排',
+        outcome TEXT NOT NULL DEFAULT '',
+        round_focus TEXT NOT NULL DEFAULT '',
         name TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -147,6 +203,20 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS artifacts_interview_updated
         ON interview_artifacts(interview_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS application_artifacts (
+        id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        markdown TEXT NOT NULL,
+        source_harness TEXT NOT NULL DEFAULT '',
+        source_session_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(application_id, kind)
+      );
+      CREATE INDEX IF NOT EXISTS application_artifacts_updated
+        ON application_artifacts(application_id, updated_at DESC);
       CREATE TABLE IF NOT EXISTS harness_sessions (
         id TEXT PRIMARY KEY,
         interview_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
@@ -171,10 +241,89 @@ export class SqliteStore {
     if (!statusColumns.some((column) => column.name === "color")) {
       this.db.exec("ALTER TABLE status_options ADD COLUMN color TEXT NOT NULL DEFAULT ''");
     }
-    this.setMeta("schema_version", "4");
+    this.migrateApplicationSchema();
+    this.setMeta("schema_version", String(SCHEMA_VERSION));
     DEFAULT_STATUS_OPTIONS.forEach(({ value, color }, index) =>
       this.addStatus(value, index, color),
     );
+  }
+
+  migrateApplicationSchema() {
+    const interviewColumns = this.db.prepare("PRAGMA table_info(interviews)").all();
+    const hasInterviewColumn = (name) => interviewColumns.some((column) => column.name === name);
+    if (!hasInterviewColumn("application_id")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN application_id TEXT REFERENCES applications(id) ON DELETE CASCADE");
+    }
+    if (!hasInterviewColumn("round_order")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN round_order INTEGER NOT NULL DEFAULT 1");
+    }
+    if (!hasInterviewColumn("round_label")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN round_label TEXT NOT NULL DEFAULT ''");
+    }
+    if (!hasInterviewColumn("round_status")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN round_status TEXT NOT NULL DEFAULT ''");
+    }
+    if (!hasInterviewColumn("outcome")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN outcome TEXT NOT NULL DEFAULT ''");
+    }
+    if (!hasInterviewColumn("round_focus")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN round_focus TEXT NOT NULL DEFAULT ''");
+    }
+
+    const attachmentColumns = this.db.prepare("PRAGMA table_info(attachments)").all();
+    if (!attachmentColumns.some((column) => column.name === "application_id")) {
+      this.db.exec("ALTER TABLE attachments ADD COLUMN application_id TEXT REFERENCES applications(id) ON DELETE CASCADE");
+    }
+
+    // Migration is deliberately one-to-one: every legacy interview becomes its
+    // own application. Candidate names and capture run IDs are never grouping keys.
+    this.transaction(() => {
+      this.db.exec(`
+        INSERT OR IGNORE INTO applications
+          (id, name, created_at, updated_at, application_status, resume_markdown,
+           role_markdown, resume_notes_json, selected_jd_id, jd_draft_name, deleted_at)
+        SELECT COALESCE(NULLIF(application_id, ''), id), name, created_at, updated_at,
+          interview_status, resume_markdown, role_markdown, resume_notes_json,
+          selected_jd_id, jd_draft_name, deleted_at
+        FROM interviews
+        ORDER BY round_order, created_at
+      `);
+      this.db.exec(`
+        UPDATE interviews
+        SET application_id = id
+        WHERE application_id IS NULL OR application_id = ''
+      `);
+      this.db.exec(`
+        UPDATE interviews
+        SET round_order = CASE WHEN round_order > 0 THEN round_order ELSE 1 END,
+            round_label = CASE WHEN round_label <> '' THEN round_label ELSE '一面' END,
+            round_status = CASE
+              WHEN round_status IN ('待安排','已安排','进行中','已结束','已取消') THEN round_status
+              WHEN interview_status = '面试中' THEN '进行中'
+              WHEN session_started_at IS NOT NULL
+                OR EXISTS (SELECT 1 FROM transcript_lines WHERE transcript_lines.interview_id = interviews.id)
+                OR interview_status NOT IN ('未面', '已安排') THEN '已结束'
+              WHEN scheduled_at IS NOT NULL THEN '已安排'
+              ELSE '待安排'
+            END
+      `);
+      this.db.exec(`
+        UPDATE attachments
+        SET application_id = (
+          SELECT application_id FROM interviews WHERE interviews.id = attachments.interview_id
+        )
+        WHERE application_id IS NULL OR application_id = ''
+      `);
+      this.promoteLegacyApplicationArtifacts();
+    });
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS interviews_application_round
+        ON interviews(application_id, round_order);
+      CREATE UNIQUE INDEX IF NOT EXISTS interviews_application_round_active
+        ON interviews(application_id, round_order) WHERE deleted_at IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS attachments_application
+        ON attachments(application_id);
+    `);
   }
 
   migrateLegacyStore() {
@@ -203,7 +352,12 @@ export class SqliteStore {
 
   getStore({ includeAllLines = false } = {}) {
     const rows = this.db
-      .prepare("SELECT * FROM interviews WHERE deleted_at IS NULL ORDER BY updated_at DESC")
+      .prepare(`
+        SELECT interviews.* FROM interviews
+        JOIN applications ON applications.id = interviews.application_id
+        WHERE interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
+        ORDER BY interviews.updated_at DESC
+      `)
       .all();
     const active = this.getMeta("active_interview_id");
     const activeInterviewId = rows.some((row) => row.id === active)
@@ -220,8 +374,12 @@ export class SqliteStore {
       .prepare("SELECT value, color FROM status_options ORDER BY sort_order, created_at")
       .all();
     return {
-      schemaVersion: 4,
+      schemaVersion: SCHEMA_VERSION,
       activeInterviewId,
+      applications: this.db
+        .prepare("SELECT * FROM applications WHERE deleted_at IS NULL ORDER BY updated_at DESC")
+        .all()
+        .map((row) => this.hydrateApplication(row)),
       interviews,
       jdLibrary: this.db
         .prepare("SELECT * FROM jd_library ORDER BY updated_at DESC")
@@ -238,9 +396,10 @@ export class SqliteStore {
 
   importStore(store, { replace = false } = {}) {
     const interviews = Array.isArray(store?.interviews) ? store.interviews : [];
+    const applications = Array.isArray(store?.applications) ? store.applications : [];
     if (replace) {
       this.db.exec(
-        "DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interview_artifacts; DELETE FROM harness_sessions; DELETE FROM interviews; DELETE FROM jd_library;",
+        "DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interview_artifacts; DELETE FROM application_artifacts; DELETE FROM harness_sessions; DELETE FROM attachments; DELETE FROM interviews; DELETE FROM applications; DELETE FROM jd_library;",
       );
     }
     for (const [index, status] of normalizeStatuses(store?.statusOptions, interviews).entries()) {
@@ -249,42 +408,179 @@ export class SqliteStore {
       if (color) this.setStatusColor(status, color);
     }
     for (const jd of Array.isArray(store?.jdLibrary) ? store.jdLibrary : []) this.upsertJd(jd);
-    for (const interview of interviews) this.upsertInterviewSnapshot(interview);
+    for (const application of applications) this.upsertApplicationSnapshot(application);
+    for (const interview of interviews) {
+      this.upsertInterviewSnapshot(interview, { mirrorApplicationArtifacts: false });
+    }
+    this.promoteLegacyApplicationArtifacts();
+    for (const application of applications) {
+      if (!application.resumeFile?.dataUrl) continue;
+      try {
+        this.saveAttachmentForApplication(application.id, application.resumeFile);
+      } catch (error) {
+        this.logger?.warn?.("store.import_attachment_skipped", {
+          applicationId: application.id,
+          error: { message: error.message },
+        });
+      }
+    }
     if (store?.activeInterviewId) this.setMeta("active_interview_id", store.activeInterviewId);
     return this.getStore();
   }
 
-  createInterview(payload) {
+  promoteLegacyApplicationArtifacts() {
+    // Older integrations could save process-wide artifacts on the only
+    // interview row. Fill only missing Application artifacts so an explicit,
+    // newer Application-level value always wins during import.
+    this.db.exec(`
+      INSERT OR IGNORE INTO application_artifacts
+        (id, application_id, kind, title, markdown, source_harness,
+         source_session_id, created_at, updated_at)
+      SELECT lower(hex(randomblob(16))), interviews.application_id,
+        interview_artifacts.kind, interview_artifacts.title,
+        interview_artifacts.markdown, interview_artifacts.source_harness,
+        interview_artifacts.source_session_id, interview_artifacts.created_at,
+        interview_artifacts.updated_at
+      FROM interview_artifacts
+      JOIN interviews ON interviews.id = interview_artifacts.interview_id
+      WHERE interview_artifacts.kind IN
+        ('resume-screening', 'process-brief', 'application-handoff', 'final-summary')
+      ORDER BY interview_artifacts.updated_at DESC
+    `);
+  }
+
+  createApplication(payload = {}) {
     const now = new Date().toISOString();
-    const interview = {
-      id: cleanId(payload.id) || crypto.randomUUID(),
-      name: cleanText(payload.name || payload.candidateName, 160) || "未命名面试",
+    const applicationId = cleanId(payload.id || payload.applicationId) || crypto.randomUUID();
+    if (this.db.prepare("SELECT 1 FROM applications WHERE id = ?").get(applicationId)) {
+      const error = new Error("应聘流程 ID 已存在");
+      error.code = "APPLICATION_ID_CONFLICT";
+      throw error;
+    }
+    const application = normalizeApplication({
+      ...payload,
+      id: applicationId,
+      applicationStatus: payload.applicationStatus || payload.interviewStatus || payload.status,
       createdAt: now,
       updatedAt: now,
-      sessionStartedAt: normalizeDate(payload.sessionStartedAt),
-      scheduledAt: normalizeDate(payload.scheduledAt || payload.interviewTime),
-      interviewStatus: cleanText(payload.interviewStatus || payload.status, 24) || "未面",
-      resumeMarkdown: cleanText(payload.resumeMarkdown || payload.resumeAnalysis, 500000),
-      roleMarkdown: cleanText(payload.roleMarkdown || payload.jdMarkdown, 500000),
-      resumeFile: payload.resumeFile || null,
-      resumeNotes: Array.isArray(payload.resumeNotes) ? payload.resumeNotes : [],
-      selectedJdId: cleanText(payload.selectedJdId, 160),
-      jdDraftName: cleanText(payload.jdDraftName || payload.jdName, 300),
-      lines: Array.isArray(payload.lines) ? payload.lines : [],
-      cards: Array.isArray(payload.cards) ? payload.cards : [],
-      askedQuestions: Array.isArray(payload.askedQuestions) ? payload.askedQuestions : [],
-      lastProcessedLineCount: Number(payload.lastProcessedLineCount || 0),
-      speakerLabels: isObject(payload.speakerLabels) ? payload.speakerLabels : {},
-      artifacts: Array.isArray(payload.artifacts) ? payload.artifacts : [],
-      harnessSessions: Array.isArray(payload.harnessSessions) ? payload.harnessSessions : [],
+    });
+    const firstRoundPayload = isObject(payload.firstRound)
+      ? { ...payload, ...payload.firstRound }
+      : payload;
+    const firstRoundId = cleanId(firstRoundPayload.interviewId || firstRoundPayload.id) || applicationId;
+    if (this.db.prepare("SELECT 1 FROM interviews WHERE id = ?").get(firstRoundId)) {
+      const error = new Error("面试轮次 ID 已存在");
+      error.code = "INTERVIEW_ID_CONFLICT";
+      throw error;
+    }
+    const firstRound = {
+      id: firstRoundId,
+      applicationId,
+      roundOrder: 1,
+      roundLabel: cleanText(firstRoundPayload.roundLabel, 80) || "一面",
+      roundStatus: normalizeRoundStatus(firstRoundPayload.roundStatus, firstRoundPayload),
+      outcome: cleanText(firstRoundPayload.outcome, 80),
+      roundFocus: cleanText(firstRoundPayload.roundFocus, 500000),
+      name: application.name,
+      createdAt: now,
+      updatedAt: now,
+      sessionStartedAt: normalizeDate(firstRoundPayload.sessionStartedAt),
+      scheduledAt: normalizeDate(firstRoundPayload.scheduledAt || firstRoundPayload.interviewTime),
+      interviewStatus: application.applicationStatus,
+      resumeMarkdown: application.resumeMarkdown,
+      roleMarkdown: application.roleMarkdown,
+      resumeFile: firstRoundPayload.resumeFile || null,
+      resumeNotes: application.resumeNotes,
+      selectedJdId: application.selectedJdId,
+      jdDraftName: application.jdDraftName,
+      lines: Array.isArray(firstRoundPayload.lines) ? firstRoundPayload.lines : [],
+      cards: Array.isArray(firstRoundPayload.cards) ? firstRoundPayload.cards : [],
+      askedQuestions: Array.isArray(firstRoundPayload.askedQuestions) ? firstRoundPayload.askedQuestions : [],
+      lastProcessedLineCount: Number(firstRoundPayload.lastProcessedLineCount || 0),
+      speakerLabels: isObject(firstRoundPayload.speakerLabels) ? firstRoundPayload.speakerLabels : {},
+      artifacts: Array.isArray(firstRoundPayload.artifacts) ? firstRoundPayload.artifacts : [],
+      harnessSessions: Array.isArray(firstRoundPayload.harnessSessions) ? firstRoundPayload.harnessSessions : [],
     };
     const currentActiveId = this.getMeta("active_interview_id");
     const shouldActivate = payload.activate === true || !this.getInterview(currentActiveId);
     this.transaction(() => {
+      this.upsertApplicationRow(application);
+      this.addStatus(application.applicationStatus);
+      this.upsertInterviewSnapshot(firstRound);
+      if (Array.isArray(payload.applicationArtifacts)) {
+        this.replaceApplicationArtifacts(applicationId, payload.applicationArtifacts);
+      }
+      if (shouldActivate) this.setMeta("active_interview_id", firstRound.id);
+    });
+    return this.getApplicationContext(applicationId);
+  }
+
+  createInterviewRound(applicationId, payload = {}) {
+    const application = this.getApplication(applicationId);
+    if (!application) return null;
+    const now = new Date().toISOString();
+    const nextOrder = this.db.prepare(`
+      SELECT COALESCE(MAX(round_order), 0) + 1 AS next_order
+      FROM interviews WHERE application_id = ? AND deleted_at IS NULL
+    `).get(applicationId).next_order;
+    const roundOrder = normalizeRoundOrder(nextOrder, 1);
+    const interviewId = cleanId(payload.id || payload.interviewId) || crypto.randomUUID();
+    if (this.db.prepare("SELECT 1 FROM interviews WHERE id = ?").get(interviewId)) {
+      const error = new Error("面试轮次 ID 已存在");
+      error.code = "INTERVIEW_ID_CONFLICT";
+      throw error;
+    }
+    const interview = {
+      id: interviewId,
+      applicationId,
+      roundOrder,
+      roundLabel: cleanText(payload.roundLabel, 80) || `第${roundOrder}轮`,
+      roundStatus: normalizeRoundStatus(payload.roundStatus, {
+        scheduledAt: payload.scheduledAt || payload.interviewTime,
+      }),
+      outcome: "",
+      roundFocus: cleanText(payload.roundFocus, 500000),
+      name: application.name,
+      createdAt: now,
+      updatedAt: now,
+      sessionStartedAt: null,
+      scheduledAt: normalizeDate(payload.scheduledAt || payload.interviewTime),
+      interviewStatus: application.applicationStatus,
+      resumeMarkdown: application.resumeMarkdown,
+      roleMarkdown: application.roleMarkdown,
+      resumeFile: null,
+      resumeNotes: application.resumeNotes,
+      selectedJdId: application.selectedJdId,
+      jdDraftName: application.jdDraftName,
+      // A new round may inherit only Application-owned material. Round-owned
+      // evidence and sessions always start empty, even if a legacy caller sends them.
+      lines: [],
+      cards: [],
+      askedQuestions: [],
+      lastProcessedLineCount: 0,
+      speakerLabels: {},
+      artifacts: [],
+      harnessSessions: [],
+    };
+    this.transaction(() => {
       this.upsertInterviewSnapshot(interview);
-      if (shouldActivate) this.setMeta("active_interview_id", interview.id);
+      this.db.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").run(now, applicationId);
+      if (payload.activate === true) this.setMeta("active_interview_id", interview.id);
     });
     return this.getInterview(interview.id);
+  }
+
+  createInterview(payload = {}) {
+    const existingApplicationId = cleanId(payload.applicationId);
+    if (existingApplicationId && this.getApplication(existingApplicationId)) {
+      return this.createInterviewRound(existingApplicationId, payload);
+    }
+    const context = this.createApplication({
+      ...payload,
+      id: existingApplicationId || payload.id,
+      firstRound: { ...payload, id: payload.id },
+    });
+    return context?.rounds?.[0] || null;
   }
 
   setActiveInterview(id) {
@@ -294,16 +590,233 @@ export class SqliteStore {
     return interview;
   }
 
+  getApplication(id) {
+    const row = this.db
+      .prepare("SELECT * FROM applications WHERE id = ? AND deleted_at IS NULL")
+      .get(id);
+    return row ? this.hydrateApplication(row) : null;
+  }
+
+  getApplicationContext(id) {
+    const application = this.getApplication(id);
+    if (!application) return null;
+    const rounds = this.db
+      .prepare(`
+        SELECT * FROM interviews
+        WHERE application_id = ? AND deleted_at IS NULL
+        ORDER BY round_order, created_at
+      `)
+      .all(id)
+      .map((row) => ({
+        id: row.id,
+        applicationId: row.application_id,
+        roundOrder: row.round_order,
+        roundLabel: row.round_label,
+        roundStatus: row.round_status,
+        outcome: row.outcome,
+        roundFocus: row.round_focus,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        sessionStartedAt: row.session_started_at || null,
+        scheduledAt: row.scheduled_at || "",
+        transcriptLineCount: this.db
+          .prepare("SELECT COUNT(*) AS count FROM transcript_lines WHERE interview_id = ?")
+          .get(row.id).count,
+        artifacts: this.listArtifacts(row.id)
+          .filter((artifact) => APPLICATION_CONTEXT_ARTIFACT_KINDS.has(artifact.kind)),
+      }));
+    const applicationArtifacts = this.listApplicationArtifacts(id);
+    return {
+      ...application,
+      rounds,
+      applicationArtifacts,
+      artifacts: applicationArtifacts,
+    };
+  }
+
+  listApplications({ query = "", status = "", limit = 50 } = {}) {
+    const normalizedQuery = cleanText(query, 160).toLowerCase();
+    const normalizedStatus = cleanText(status, 24);
+    const rows = this.db.prepare(`
+      SELECT applications.*,
+        (SELECT COUNT(*) FROM interviews
+          WHERE application_id = applications.id AND deleted_at IS NULL) AS round_count,
+        (SELECT COUNT(*) FROM application_artifacts
+          WHERE application_id = applications.id) AS artifact_count,
+        (SELECT MIN(scheduled_at) FROM interviews
+          WHERE application_id = applications.id AND deleted_at IS NULL
+            AND datetime(scheduled_at) >= datetime('now')) AS next_round_at
+      FROM applications
+      WHERE deleted_at IS NULL
+        AND (? = '' OR application_status = ?)
+        AND (? = '' OR LOWER(name) LIKE '%' || ? || '%'
+          OR LOWER(jd_draft_name) LIKE '%' || ? || '%')
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(
+      normalizedStatus,
+      normalizedStatus,
+      normalizedQuery,
+      normalizedQuery,
+      normalizedQuery,
+      Math.min(200, Math.max(1, Number(limit) || 50)),
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      applicationStatus: row.application_status,
+      interviewStatus: row.application_status,
+      selectedJdId: row.selected_jd_id,
+      jdDraftName: row.jd_draft_name,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      roundCount: row.round_count,
+      artifactCount: row.artifact_count,
+      nextRoundAt: row.next_round_at || "",
+    }));
+  }
+
+  patchApplication(id, patch = {}) {
+    const current = this.getApplication(id);
+    if (!current) return null;
+    const aliases = {
+      ...patch,
+      applicationStatus: patch.applicationStatus || patch.interviewStatus || patch.status,
+    };
+    const merged = normalizeApplication({
+      ...current,
+      ...pick(aliases, [
+        "name",
+        "applicationStatus",
+        "resumeMarkdown",
+        "roleMarkdown",
+        "resumeNotes",
+        "selectedJdId",
+        "jdDraftName",
+      ]),
+      createdAt: current.createdAt,
+      updatedAt: new Date().toISOString(),
+    });
+    this.transaction(() => {
+      this.upsertApplicationRow(merged);
+      this.syncApplicationSharedFields(merged);
+      this.addStatus(merged.applicationStatus);
+    });
+    return this.getApplication(id);
+  }
+
+  softDeleteApplication(id) {
+    const now = new Date().toISOString();
+    return this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE applications SET deleted_at = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(now, now, id);
+      if (!result.changes) return false;
+      this.db.prepare(`
+        UPDATE interviews SET deleted_at = ?, updated_at = ?
+        WHERE application_id = ? AND deleted_at IS NULL
+      `).run(now, now, id);
+      return true;
+    });
+  }
+
+  upsertApplicationArtifact(applicationId, artifact) {
+    if (!this.getApplication(applicationId)) return null;
+    const now = new Date().toISOString();
+    const kind = cleanSlug(artifact?.kind, 80);
+    const markdown = cleanText(artifact?.markdown, 1000000);
+    if (!kind) throw new Error("Artifact kind is required");
+    if (!markdown) throw new Error("Artifact markdown is required");
+    const existing = this.db.prepare(`
+      SELECT * FROM application_artifacts WHERE application_id = ? AND kind = ?
+    `).get(applicationId, kind);
+    const value = {
+      id: existing?.id || cleanId(artifact?.id) || crypto.randomUUID(),
+      applicationId,
+      kind,
+      title: cleanText(artifact?.title, 200) || artifactTitle(kind),
+      markdown,
+      sourceHarness: cleanSlug(artifact?.sourceHarness, 40),
+      sourceSessionId: cleanText(artifact?.sourceSessionId, 200),
+      createdAt: existing?.created_at || normalizeDate(artifact?.createdAt) || now,
+      updatedAt: now,
+    };
+    this.db.prepare(`
+      INSERT INTO application_artifacts
+        (id, application_id, kind, title, markdown, source_harness,
+         source_session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(application_id, kind) DO UPDATE SET
+        title=excluded.title, markdown=excluded.markdown,
+        source_harness=excluded.source_harness,
+        source_session_id=excluded.source_session_id, updated_at=excluded.updated_at
+    `).run(
+      value.id,
+      value.applicationId,
+      value.kind,
+      value.title,
+      value.markdown,
+      value.sourceHarness,
+      value.sourceSessionId,
+      value.createdAt,
+      value.updatedAt,
+    );
+    this.db.prepare("UPDATE applications SET updated_at = ? WHERE id = ?")
+      .run(now, applicationId);
+    return this.listApplicationArtifacts(applicationId).find((item) => item.kind === kind);
+  }
+
+  listApplicationArtifacts(applicationId) {
+    return this.db
+      .prepare("SELECT * FROM application_artifacts WHERE application_id = ? ORDER BY updated_at DESC")
+      .all(applicationId)
+      .map(mapApplicationArtifact);
+  }
+
+  getCrossRoundContext(interviewId, maxChars = 60000) {
+    const current = this.getInterviewContext(interviewId);
+    if (!current) return "";
+    const sections = [];
+    const applicationArtifacts = this.listApplicationArtifacts(current.applicationId);
+    for (const kind of ["process-brief", "application-handoff", "final-summary"]) {
+      const artifact = applicationArtifacts.find((item) => item.kind === kind);
+      if (artifact) sections.push(`## ${artifact.title}\n\n${artifact.markdown}`);
+    }
+    const priorRounds = this.db.prepare(`
+      SELECT * FROM interviews
+      WHERE application_id = ? AND deleted_at IS NULL AND round_order < ?
+      ORDER BY round_order, created_at
+    `).all(current.applicationId, current.roundOrder);
+    for (const round of priorRounds) {
+      const artifacts = this.listArtifacts(round.id);
+      const artifact = artifacts.find((item) => item.kind === "round-handoff")
+        || artifacts.find((item) => item.kind === "interview-summary");
+      if (!artifact) continue;
+      sections.push(`## ${round.round_label || `第${round.round_order}轮`}交接\n\n${artifact.markdown}`);
+    }
+    const safeMaxChars = Math.min(500000, Math.max(0, Number(maxChars) || 60000));
+    return sections.join("\n\n").slice(0, safeMaxChars);
+  }
+
   getInterview(id) {
     const row = this.db
-      .prepare("SELECT * FROM interviews WHERE id = ? AND deleted_at IS NULL")
+      .prepare(`
+        SELECT interviews.* FROM interviews
+        JOIN applications ON applications.id = interviews.application_id
+        WHERE interviews.id = ? AND interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
+      `)
       .get(id);
     return row ? this.hydrateInterview(row) : null;
   }
 
   getInterviewContext(id) {
     const row = this.db
-      .prepare("SELECT * FROM interviews WHERE id = ? AND deleted_at IS NULL")
+      .prepare(`
+        SELECT interviews.* FROM interviews
+        JOIN applications ON applications.id = interviews.application_id
+        WHERE interviews.id = ? AND interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
+      `)
       .get(id);
     return row ? this.hydrateInterview(row, { includeLines: false }) : null;
   }
@@ -313,15 +826,21 @@ export class SqliteStore {
     const normalizedStatus = cleanText(status, 24);
     const rows = this.db
       .prepare(`
-        SELECT id, name, interview_status, scheduled_at, session_started_at, created_at, updated_at,
-          jd_draft_name, selected_jd_id,
+        SELECT interviews.id, interviews.application_id, interviews.round_order,
+          interviews.round_label, interviews.round_status, interviews.outcome,
+          applications.name, applications.application_status AS interview_status,
+          interviews.scheduled_at, interviews.session_started_at,
+          interviews.created_at, interviews.updated_at,
+          applications.jd_draft_name, applications.selected_jd_id,
           (SELECT COUNT(*) FROM transcript_lines WHERE interview_id = interviews.id) AS transcript_line_count,
           (SELECT COUNT(*) FROM interview_artifacts WHERE interview_id = interviews.id) AS artifact_count
         FROM interviews
-        WHERE deleted_at IS NULL
-          AND (? = '' OR interview_status = ?)
-          AND (? = '' OR LOWER(name) LIKE '%' || ? || '%' OR LOWER(jd_draft_name) LIKE '%' || ? || '%')
-        ORDER BY COALESCE(scheduled_at, updated_at) DESC
+        JOIN applications ON applications.id = interviews.application_id
+        WHERE interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
+          AND (? = '' OR applications.application_status = ?)
+          AND (? = '' OR LOWER(applications.name) LIKE '%' || ? || '%'
+            OR LOWER(applications.jd_draft_name) LIKE '%' || ? || '%')
+        ORDER BY COALESCE(interviews.scheduled_at, interviews.updated_at) DESC
         LIMIT ?
       `)
       .all(
@@ -334,6 +853,11 @@ export class SqliteStore {
       );
     return rows.map((row) => ({
       id: row.id,
+      applicationId: row.application_id,
+      roundOrder: row.round_order,
+      roundLabel: row.round_label,
+      roundStatus: row.round_status,
+      outcome: row.outcome,
       name: row.name,
       interviewStatus: row.interview_status,
       scheduledAt: row.scheduled_at || "",
@@ -371,18 +895,27 @@ export class SqliteStore {
   patchInterview(id, patch) {
     const current = this.getInterview(id);
     if (!current) return null;
+    const sharedPatch = pick(patch, [
+      "name",
+      "resumeMarkdown",
+      "roleMarkdown",
+      "resumeNotes",
+      "selectedJdId",
+      "jdDraftName",
+    ]);
+    if ("interviewStatus" in (patch || {}) || "applicationStatus" in (patch || {}) || "status" in (patch || {})) {
+      sharedPatch.applicationStatus = patch.applicationStatus || patch.interviewStatus || patch.status;
+    }
     const merged = {
       ...current,
       ...pick(patch, [
-        "name",
         "sessionStartedAt",
         "scheduledAt",
-        "interviewStatus",
-        "resumeMarkdown",
-        "roleMarkdown",
-        "resumeNotes",
-        "selectedJdId",
-        "jdDraftName",
+        "roundOrder",
+        "roundLabel",
+        "roundStatus",
+        "outcome",
+        "roundFocus",
         "lastProcessedLineCount",
         "speakerLabels",
         "askedQuestions",
@@ -396,18 +929,41 @@ export class SqliteStore {
       Number(merged.lastProcessedLineCount || 0),
     );
     this.transaction(() => {
+      if (Object.keys(sharedPatch).length) this.patchApplication(current.applicationId, sharedPatch);
+      const application = this.getApplication(current.applicationId);
+      Object.assign(merged, sharedFieldsForInterview(application));
       this.upsertInterviewRow(merged);
       if (Array.isArray(patch.askedQuestions)) this.replaceQuestions(id, patch.askedQuestions);
-      this.addStatus(merged.interviewStatus);
+      this.db.prepare("UPDATE applications SET updated_at = ? WHERE id = ?")
+        .run(merged.updatedAt, current.applicationId);
     });
     return this.getInterview(id);
   }
 
   softDeleteInterview(id) {
-    const result = this.db
-      .prepare("UPDATE interviews SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL")
-      .run(new Date().toISOString(), new Date().toISOString(), id);
-    return result.changes > 0;
+    const interview = this.db.prepare(`
+      SELECT id, application_id FROM interviews WHERE id = ? AND deleted_at IS NULL
+    `).get(id);
+    if (!interview) return false;
+    const activeRoundCount = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM interviews
+      WHERE application_id = ? AND deleted_at IS NULL
+    `).get(interview.application_id).count;
+    if (activeRoundCount <= 1) {
+      const error = new Error("唯一一轮不能删除，请归档整个应聘流程");
+      error.code = "LAST_ROUND";
+      throw error;
+    }
+    const now = new Date().toISOString();
+    return this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE interviews SET deleted_at = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(now, now, id);
+      this.db.prepare("UPDATE applications SET updated_at = ? WHERE id = ?")
+        .run(now, interview.application_id);
+      return result.changes > 0;
+    });
   }
 
   appendLines(interviewId, lines) {
@@ -448,7 +1004,13 @@ export class SqliteStore {
   }
 
   saveAttachment(interviewId, file) {
-    if (!this.getInterview(interviewId)) return null;
+    const interview = this.getInterviewContext(interviewId);
+    if (!interview) return null;
+    return this.saveAttachmentForApplication(interview.applicationId, file, interviewId);
+  }
+
+  saveAttachmentForApplication(applicationId, file, ownerInterviewId = "") {
+    if (!this.getApplication(applicationId)) return null;
     if (!isObject(file)) throw new Error("Invalid attachment");
     const data = decodeDataUrl(file.dataUrl);
     if (!data.length || data.length > 10 * 1024 * 1024) {
@@ -459,7 +1021,13 @@ export class SqliteStore {
     if (!isAllowedResume(name, type)) throw new Error("Only PDF, DOC, and DOCX resumes are supported");
     const format = sniffResumeFormat(data);
     if (!format) throw new Error("Resume content is not a valid PDF, DOC, or DOCX file");
-    const existing = this.db.prepare("SELECT * FROM attachments WHERE interview_id = ?").get(interviewId);
+    const existing = this.db.prepare("SELECT * FROM attachments WHERE application_id = ?").get(applicationId);
+    const attachmentOwnerId = existing?.interview_id || cleanId(ownerInterviewId)
+      || this.db.prepare(`
+        SELECT id FROM interviews WHERE application_id = ? AND deleted_at IS NULL
+        ORDER BY round_order, created_at LIMIT 1
+      `).get(applicationId)?.id;
+    if (!attachmentOwnerId) return null;
     const id = existing?.id || crypto.randomUUID();
     const extension = format.extension;
     const relativePath = path.join("attachments", `${id}${extension}`);
@@ -467,15 +1035,17 @@ export class SqliteStore {
     fs.writeFileSync(absolutePath, data, { mode: 0o600 });
     if (existing && existing.relative_path !== relativePath) safeUnlink(path.join(this.config.dataDir, existing.relative_path));
     this.db.prepare(`
-      INSERT INTO attachments (id, interview_id, name, type, size, relative_path, preview_text, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(interview_id) DO UPDATE SET
+      INSERT INTO attachments
+        (id, application_id, interview_id, name, type, size, relative_path, preview_text, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(application_id) DO UPDATE SET
         name=excluded.name, type=excluded.type, size=excluded.size,
         relative_path=excluded.relative_path, preview_text=excluded.preview_text,
         updated_at=excluded.updated_at
     `).run(
       id,
-      interviewId,
+      applicationId,
+      attachmentOwnerId,
       name,
       format.type,
       data.length,
@@ -483,13 +1053,16 @@ export class SqliteStore {
       cleanText(file.previewText, 500000),
       new Date().toISOString(),
     );
-    return this.getAttachmentForInterview(interviewId);
+    return this.getAttachmentForApplication(applicationId);
   }
 
   removeAttachment(interviewId) {
-    const existing = this.db.prepare("SELECT * FROM attachments WHERE interview_id = ?").get(interviewId);
+    const interview = this.getInterviewContext(interviewId);
+    if (!interview) return false;
+    const existing = this.db.prepare("SELECT * FROM attachments WHERE application_id = ?")
+      .get(interview.applicationId);
     if (!existing) return false;
-    this.db.prepare("DELETE FROM attachments WHERE interview_id = ?").run(interviewId);
+    this.db.prepare("DELETE FROM attachments WHERE application_id = ?").run(interview.applicationId);
     safeUnlink(path.join(this.config.dataDir, existing.relative_path));
     return true;
   }
@@ -497,15 +1070,32 @@ export class SqliteStore {
   getAttachment(id) {
     const row = this.db.prepare(`
       SELECT attachments.* FROM attachments
-      JOIN interviews ON interviews.id = attachments.interview_id
-      WHERE attachments.id = ? AND interviews.deleted_at IS NULL
+      JOIN applications ON applications.id = attachments.application_id
+      WHERE attachments.id = ? AND applications.deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM interviews
+          WHERE interviews.application_id = applications.id AND interviews.deleted_at IS NULL
+        )
     `).get(id);
     if (!row) return null;
     return { ...mapAttachment(row), absolutePath: path.join(this.config.dataDir, row.relative_path) };
   }
 
   getAttachmentForInterview(interviewId) {
-    const row = this.db.prepare("SELECT * FROM attachments WHERE interview_id = ?").get(interviewId);
+    const interview = this.db.prepare(`
+      SELECT interviews.application_id FROM interviews
+      JOIN applications ON applications.id = interviews.application_id
+      WHERE interviews.id = ? AND interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
+    `).get(interviewId);
+    if (!interview) return null;
+    return this.getAttachmentForApplication(interview.application_id);
+  }
+
+  getAttachmentForApplication(applicationId) {
+    if (!this.db.prepare("SELECT 1 FROM applications WHERE id = ? AND deleted_at IS NULL").get(applicationId)) {
+      return null;
+    }
+    const row = this.db.prepare("SELECT * FROM attachments WHERE application_id = ?").get(applicationId);
     return row ? mapAttachment(row) : null;
   }
 
@@ -564,7 +1154,7 @@ export class SqliteStore {
     return { value, color: normalizedColor };
   }
 
-  upsertArtifact(interviewId, artifact) {
+  upsertArtifact(interviewId, artifact, { mirrorApplication = true } = {}) {
     if (!this.getInterviewContext(interviewId)) return null;
     const now = new Date().toISOString();
     const kind = cleanSlug(artifact?.kind, 80);
@@ -605,6 +1195,20 @@ export class SqliteStore {
       value.updatedAt,
     );
     this.db.prepare("UPDATE interviews SET updated_at = ? WHERE id = ?").run(now, interviewId);
+    if (mirrorApplication && APPLICATION_ARTIFACT_COMPAT_KINDS.has(kind)) {
+      const applicationId = this.db
+        .prepare("SELECT application_id FROM interviews WHERE id = ?")
+        .get(interviewId)?.application_id;
+      if (applicationId) {
+        this.upsertApplicationArtifact(applicationId, {
+          kind,
+          title: value.title,
+          markdown: value.markdown,
+          sourceHarness: value.sourceHarness,
+          sourceSessionId: value.sourceSessionId,
+        });
+      }
+    }
     return this.listArtifacts(interviewId).find((item) => item.kind === kind);
   }
 
@@ -803,16 +1407,16 @@ export class SqliteStore {
     return {
       ...store,
       exportedAt: new Date().toISOString(),
-      interviews: store.interviews.map((interview) => {
-        if (!interview.resumeFile) return interview;
-        const attachment = this.getAttachment(interview.resumeFile.id);
-        if (!attachment || !fs.existsSync(attachment.absolutePath)) return interview;
+      applications: store.applications.map((application) => {
+        if (!application.resumeFile) return application;
+        const attachment = this.getAttachment(application.resumeFile.id);
+        if (!attachment || !fs.existsSync(attachment.absolutePath)) return application;
         const data = fs.readFileSync(attachment.absolutePath).toString("base64");
         return {
-          ...interview,
+          ...application,
           resumeFile: {
-            ...interview.resumeFile,
-            dataUrl: `data:${interview.resumeFile.type};base64,${data}`,
+            ...application.resumeFile,
+            dataUrl: `data:${application.resumeFile.type};base64,${data}`,
           },
         };
       }),
@@ -859,7 +1463,29 @@ export class SqliteStore {
     }
   }
 
+  hydrateApplication(row) {
+    const rounds = this.db.prepare(`
+      SELECT id, round_order, scheduled_at FROM interviews
+      WHERE application_id = ? AND deleted_at IS NULL
+      ORDER BY round_order, created_at
+    `).all(row.id);
+    const applicationArtifacts = this.listApplicationArtifacts(row.id);
+    return {
+      ...mapApplication(row),
+      resumeFile: this.getAttachmentForApplication(row.id),
+      roundCount: rounds.length,
+      roundIds: rounds.map((round) => round.id),
+      applicationArtifacts,
+      artifacts: applicationArtifacts,
+    };
+  }
+
   hydrateInterview(row, { includeLines = true } = {}) {
+    const applicationRow = this.db
+      .prepare("SELECT * FROM applications WHERE id = ? AND deleted_at IS NULL")
+      .get(row.application_id);
+    if (!applicationRow) return null;
+    const application = mapApplication(applicationRow);
     const lines = includeLines
       ? this.db
         .prepare("SELECT * FROM transcript_lines WHERE interview_id = ? ORDER BY position")
@@ -881,18 +1507,25 @@ export class SqliteStore {
       .map((item) => item.question);
     return {
       id: row.id,
-      name: row.name,
+      applicationId: row.application_id,
+      roundOrder: row.round_order,
+      roundLabel: row.round_label,
+      roundStatus: row.round_status,
+      outcome: row.outcome,
+      roundFocus: row.round_focus,
+      name: application.name,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       sessionStartedAt: row.session_started_at || null,
       scheduledAt: row.scheduled_at || "",
-      interviewStatus: row.interview_status,
-      resumeMarkdown: row.resume_markdown,
-      roleMarkdown: row.role_markdown,
+      interviewStatus: application.applicationStatus,
+      applicationStatus: application.applicationStatus,
+      resumeMarkdown: application.resumeMarkdown,
+      roleMarkdown: application.roleMarkdown,
       resumeFile: this.getAttachmentForInterview(row.id),
-      resumeNotes: parseJson(row.resume_notes_json, []),
-      selectedJdId: row.selected_jd_id,
-      jdDraftName: row.jd_draft_name,
+      resumeNotes: application.resumeNotes,
+      selectedJdId: application.selectedJdId,
+      jdDraftName: application.jdDraftName,
       ...(includeLines ? { lines } : {}),
       transcriptLineCount,
       cards,
@@ -904,8 +1537,25 @@ export class SqliteStore {
     };
   }
 
-  upsertInterviewSnapshot(interview) {
-    const normalized = normalizeInterview(interview);
+  upsertInterviewSnapshot(interview, { mirrorApplicationArtifacts = true } = {}) {
+    const applicationId = cleanId(interview?.applicationId) || cleanId(interview?.id) || crypto.randomUUID();
+    let applicationRow = this.db.prepare("SELECT * FROM applications WHERE id = ?").get(applicationId);
+    if (!applicationRow) {
+      const application = normalizeApplication({
+        ...interview,
+        id: applicationId,
+        applicationStatus: interview?.applicationStatus || interview?.interviewStatus,
+      });
+      this.upsertApplicationRow(application);
+      this.addStatus(application.applicationStatus);
+      applicationRow = this.db.prepare("SELECT * FROM applications WHERE id = ?").get(applicationId);
+    }
+    const application = mapApplication(applicationRow);
+    const normalized = normalizeInterview({
+      ...interview,
+      ...sharedFieldsForInterview(application),
+      applicationId,
+    });
     this.upsertInterviewRow(normalized);
     this.addStatus(normalized.interviewStatus);
     if (interview.resumeFile?.dataUrl) {
@@ -922,19 +1572,83 @@ export class SqliteStore {
     this.replaceLines(normalized.id, normalized.lines);
     this.replaceCards(normalized.id, normalized.cards);
     this.replaceQuestions(normalized.id, normalized.askedQuestions);
-    this.replaceArtifacts(normalized.id, normalized.artifacts);
+    this.replaceArtifacts(normalized.id, normalized.artifacts, {
+      mirrorApplication: mirrorApplicationArtifacts,
+    });
     this.replaceHarnessSessions(normalized.id, normalized.harnessSessions);
+  }
+
+  upsertApplicationSnapshot(application) {
+    const normalized = normalizeApplication(application);
+    this.upsertApplicationRow(normalized);
+    this.addStatus(normalized.applicationStatus);
+    this.replaceApplicationArtifacts(
+      normalized.id,
+      Array.isArray(application?.applicationArtifacts)
+        ? application.applicationArtifacts
+        : Array.isArray(application?.artifacts) ? application.artifacts : [],
+    );
+    return normalized;
+  }
+
+  upsertApplicationRow(application) {
+    const value = normalizeApplication(application);
+    this.db.prepare(`
+      INSERT INTO applications
+        (id, name, created_at, updated_at, application_status, resume_markdown,
+         role_markdown, resume_notes_json, selected_jd_id, jd_draft_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, updated_at=excluded.updated_at,
+        application_status=excluded.application_status,
+        resume_markdown=excluded.resume_markdown, role_markdown=excluded.role_markdown,
+        resume_notes_json=excluded.resume_notes_json,
+        selected_jd_id=excluded.selected_jd_id, jd_draft_name=excluded.jd_draft_name,
+        deleted_at=NULL
+    `).run(
+      value.id,
+      value.name,
+      value.createdAt,
+      value.updatedAt,
+      value.applicationStatus,
+      value.resumeMarkdown,
+      value.roleMarkdown,
+      JSON.stringify(value.resumeNotes),
+      value.selectedJdId,
+      value.jdDraftName,
+    );
+  }
+
+  syncApplicationSharedFields(application) {
+    this.db.prepare(`
+      UPDATE interviews SET name = ?, interview_status = ?, resume_markdown = ?,
+        role_markdown = ?, resume_notes_json = ?, selected_jd_id = ?, jd_draft_name = ?
+      WHERE application_id = ?
+    `).run(
+      application.name,
+      application.applicationStatus,
+      application.resumeMarkdown,
+      application.roleMarkdown,
+      JSON.stringify(application.resumeNotes),
+      application.selectedJdId,
+      application.jdDraftName,
+      application.id,
+    );
   }
 
   upsertInterviewRow(interview) {
     const value = normalizeInterview(interview);
     this.db.prepare(`
       INSERT INTO interviews
-        (id, name, created_at, updated_at, session_started_at, scheduled_at,
+        (id, application_id, round_order, round_label, round_status, outcome, round_focus,
+         name, created_at, updated_at, session_started_at, scheduled_at,
          interview_status, resume_markdown, role_markdown, resume_notes_json,
          selected_jd_id, jd_draft_name, last_processed_line_count, speaker_labels_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        application_id=excluded.application_id, round_order=excluded.round_order,
+        round_label=excluded.round_label, round_status=excluded.round_status,
+        outcome=excluded.outcome, round_focus=excluded.round_focus,
         name=excluded.name, updated_at=excluded.updated_at,
         session_started_at=excluded.session_started_at, scheduled_at=excluded.scheduled_at,
         interview_status=excluded.interview_status, resume_markdown=excluded.resume_markdown,
@@ -944,6 +1658,12 @@ export class SqliteStore {
         speaker_labels_json=excluded.speaker_labels_json, deleted_at=NULL
     `).run(
       value.id,
+      value.applicationId,
+      value.roundOrder,
+      value.roundLabel,
+      value.roundStatus,
+      value.outcome,
+      value.roundFocus,
       value.name,
       value.createdAt,
       value.updatedAt,
@@ -1014,9 +1734,16 @@ export class SqliteStore {
     });
   }
 
-  replaceArtifacts(interviewId, artifacts) {
+  replaceArtifacts(interviewId, artifacts, { mirrorApplication = true } = {}) {
     this.db.prepare("DELETE FROM interview_artifacts WHERE interview_id = ?").run(interviewId);
-    for (const artifact of artifacts) this.upsertArtifact(interviewId, artifact);
+    for (const artifact of artifacts) {
+      this.upsertArtifact(interviewId, artifact, { mirrorApplication });
+    }
+  }
+
+  replaceApplicationArtifacts(applicationId, artifacts) {
+    this.db.prepare("DELETE FROM application_artifacts WHERE application_id = ?").run(applicationId);
+    for (const artifact of artifacts) this.upsertApplicationArtifact(applicationId, artifact);
   }
 
   replaceHarnessSessions(interviewId, sessions) {
@@ -1055,10 +1782,36 @@ export class SqliteStore {
   }
 }
 
-function normalizeInterview(interview) {
+function normalizeApplication(application) {
   const now = new Date().toISOString();
   return {
+    id: cleanId(application?.id) || crypto.randomUUID(),
+    name: cleanText(application?.name || application?.candidateName, 160) || "未命名面试",
+    createdAt: normalizeDate(application?.createdAt) || now,
+    updatedAt: normalizeDate(application?.updatedAt) || now,
+    applicationStatus: cleanText(
+      application?.applicationStatus || application?.interviewStatus || application?.status,
+      24,
+    ) || "未面",
+    resumeMarkdown: cleanText(application?.resumeMarkdown || application?.resumeAnalysis, 500000),
+    roleMarkdown: cleanText(application?.roleMarkdown || application?.jdMarkdown, 500000),
+    resumeNotes: Array.isArray(application?.resumeNotes) ? application.resumeNotes : [],
+    selectedJdId: cleanText(application?.selectedJdId, 160),
+    jdDraftName: cleanText(application?.jdDraftName || application?.jdName, 300),
+  };
+}
+
+function normalizeInterview(interview) {
+  const now = new Date().toISOString();
+  const roundOrder = normalizeRoundOrder(interview?.roundOrder, 1);
+  return {
     id: cleanId(interview?.id) || crypto.randomUUID(),
+    applicationId: cleanId(interview?.applicationId) || cleanId(interview?.id) || crypto.randomUUID(),
+    roundOrder,
+    roundLabel: cleanText(interview?.roundLabel, 80) || (roundOrder === 1 ? "一面" : `第${roundOrder}轮`),
+    roundStatus: normalizeRoundStatus(interview?.roundStatus, interview),
+    outcome: cleanText(interview?.outcome, 80),
+    roundFocus: cleanText(interview?.roundFocus, 500000),
     name: cleanText(interview?.name, 160) || "未命名面试",
     createdAt: normalizeDate(interview?.createdAt) || now,
     updatedAt: normalizeDate(interview?.updatedAt) || now,
@@ -1077,6 +1830,35 @@ function normalizeInterview(interview) {
     speakerLabels: isObject(interview?.speakerLabels) ? interview.speakerLabels : {},
     artifacts: Array.isArray(interview?.artifacts) ? interview.artifacts : [],
     harnessSessions: Array.isArray(interview?.harnessSessions) ? interview.harnessSessions : [],
+  };
+}
+
+function normalizeRoundOrder(value, fallback = 1) {
+  const number = Math.trunc(Number(value));
+  return number > 0 ? number : Math.max(1, Math.trunc(Number(fallback)) || 1);
+}
+
+function normalizeRoundStatus(value, round = {}) {
+  const status = cleanText(value, 24);
+  if (status) {
+    if (!ROUND_STATUSES.has(status)) throw new Error("Invalid round status");
+    return status;
+  }
+  if (round?.interviewStatus === "面试中") return "进行中";
+  if (round?.sessionStartedAt || round?.lines?.length || round?.cards?.length) return "已结束";
+  return round?.scheduledAt || round?.interviewTime ? "已安排" : "待安排";
+}
+
+function sharedFieldsForInterview(application) {
+  return {
+    name: application.name,
+    interviewStatus: application.applicationStatus,
+    applicationStatus: application.applicationStatus,
+    resumeMarkdown: application.resumeMarkdown,
+    roleMarkdown: application.roleMarkdown,
+    resumeNotes: application.resumeNotes,
+    selectedJdId: application.selectedJdId,
+    jdDraftName: application.jdDraftName,
   };
 }
 
@@ -1140,11 +1922,28 @@ function mapJob(row) {
 function mapAttachment(row) {
   return {
     id: row.id,
+    applicationId: row.application_id,
     name: row.name,
     type: row.type,
     size: row.size,
     url: `/api/attachments/${encodeURIComponent(row.id)}`,
     previewText: row.preview_text,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapApplication(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    applicationStatus: row.application_status,
+    interviewStatus: row.application_status,
+    resumeMarkdown: row.resume_markdown,
+    roleMarkdown: row.role_markdown,
+    resumeNotes: parseJson(row.resume_notes_json, []),
+    selectedJdId: row.selected_jd_id,
+    jdDraftName: row.jd_draft_name,
+    createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
@@ -1163,6 +1962,20 @@ function mapArtifact(row) {
   return {
     id: row.id,
     interviewId: row.interview_id,
+    kind: row.kind,
+    title: row.title,
+    markdown: row.markdown,
+    sourceHarness: row.source_harness,
+    sourceSessionId: row.source_session_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapApplicationArtifact(row) {
+  return {
+    id: row.id,
+    applicationId: row.application_id,
     kind: row.kind,
     title: row.title,
     markdown: row.markdown,
@@ -1247,6 +2060,10 @@ function artifactTitle(kind) {
     "resume-screening": "Resume screening",
     "interview-preparation": "Interview preparation",
     "interview-summary": "Interview summary",
+    "round-handoff": "Round handoff",
+    "process-brief": "Application process brief",
+    "application-handoff": "Application handoff",
+    "final-summary": "Final hiring summary",
   }[kind] || kind;
 }
 

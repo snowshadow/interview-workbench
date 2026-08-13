@@ -74,6 +74,8 @@ export class AnalysisJobService {
         ),
         roleMarkdown: boundedText(input.roleMarkdown, 80000),
         transcriptContext: buildTranscriptContext(interview, segmentStart, 60000),
+        currentRoundFocus: boundedText(interview.roundFocus, 20000),
+        crossRoundBrief: boundedText(input.crossRoundBrief, 80000),
         transcriptSlice,
         askedQuestions: boundedList(input.askedQuestions, 200, 500),
         previousCards: boundedList(

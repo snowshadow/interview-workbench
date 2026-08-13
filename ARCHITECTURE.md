@@ -9,12 +9,12 @@
 ```text
 浏览器 (React + Web Audio)
   |-- 采集：麦克风，或麦克风 + 共享窗口音频混流
-  |-- REST：场次、简历、JD、备份、分析任务
+  |-- REST：应聘流程、面试轮次、简历、JD、备份、分析任务
   |-- WebSocket：16kHz PCM 音频与实时转录
   v
 Node 服务 (Express + ws)
   |-- 安全边界：来源、令牌、安全响应头
-  |-- SQLite 数据仓库：场次、转录、卡片、任务
+  |-- SQLite 数据仓库：应聘流程、面试轮次、转录、卡片、任务
   |-- 附件存储：PDF/DOC/DOCX
   |-- 分析任务服务：幂等、重试、恢复、并发
   |-- ASR 服务适配器：火山引擎协议
@@ -22,25 +22,33 @@ Node 服务 (Express + ws)
 
 AI 编程助手 (Codex / Claude Code / WorkBuddy)
   |-- Agent Skill：筛选、准备、创建、总结
-  `-- 标准输入输出 MCP：分页读取场次并回写 Markdown 产物
+  `-- 标准输入输出 MCP：读取应聘流程、分页读取单轮转录并回写 Markdown 产物
         `-- REST API -> SQLite 数据仓库
 ```
 
 ## 数据模型
 
-- `interviews`：场次元数据、状态、时间、准备材料和分析游标
+核心关系为 `Application -> InterviewRound`。Application 表示“候选人 × 岗位”的一次应聘流程，InterviewRound 仍使用 `interviews` 表保存，以兼容现有场次、转录和分析接口。
+
+- `applications`：候选人、岗位/JD、简历、流程状态和跨轮汇总
+- `interviews`：所属 Application、轮次顺序与名称、轮次状态、时间、本轮目标和分析游标
 - `transcript_lines`：按场次和位置递增保存的确定转录
 - `analysis_cards`：前端展示的追问卡片
 - `analysis_jobs`：持久化任务状态、尝试次数、输入和结果
 - `attachments`：文件元数据；二进制保存在 `attachments/`
 - `jd_library` / `status_options`：可复用 JD 和自定义状态
 - `interview_artifacts`：筛选、准备、总结等可回写 Markdown 产物
+- `application_artifacts`：跨轮交接、流程汇总和最终结论等 Markdown 产物
 - `harness_sessions`：场次与 Codex、Claude Code、WorkBuddy 等会话的关联
 - `provider_settings`：网页保存的 ASR、LLM 配置；密钥不进入 JSON 导出
 
 SQLite 启用 WAL、外键和 busy timeout；事务通过 SAVEPOINT 支持可重入嵌套。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
 
-`GET /api/store` 只内联活跃场次的转录，其余场次暴露 `transcriptLineCount`，切换场次时按需加载；导出和备份始终包含全部转录。分析游标 `last_processed_line_count` 只允许前进，客户端补丁不能回退它。附件按魔数校验内容（PDF/DOCX/DOC/RTF），扩展名和 MIME 以内容为准。
+Application 的 `applicationStatus` 表示招聘判断；InterviewRound 的 `roundStatus` 只表示机械生命周期，取值为“待安排、已安排、进行中、已结束、已取消”。新建轮次未显式传状态时，服务按 `scheduledAt` 推导“待安排”或“已安排”；开始、停止和取消等工作台动作继续推进轮次状态。兼容字段 `interviewStatus` 映射到所属 Application 的 `applicationStatus`，不能用来修改 `roundStatus`。
+
+`GET /api/store` 只内联活跃轮次的转录，其余轮次暴露 `transcriptLineCount`，切换轮次时按需加载；导出和备份始终包含全部转录。分析游标 `last_processed_line_count` 只允许前进，客户端补丁不能回退它。附件按魔数校验内容（PDF/DOCX/DOC/RTF），扩展名和 MIME 以内容为准。
+
+跨轮消费遵循最小上下文原则：下一轮默认读取 Application 共享资料，以及此前轮次沉淀的已确认事实、未验证风险、矛盾点和下一轮目标，不自动拼接全部历史转录。只有摘要不足以支撑判断时，AI 编程助手才按轮次分页读取原始转录。
 
 Provider 配置按“网页保存值优先、环境变量回退”的顺序合并。保存后直接更新 provider 共享配置对象，新建 ASR 会话和后续 LLM 任务立即使用新值，不需要重启服务。监听地址、端口、数据目录、访问令牌等启动参数仍只由环境变量控制。
 
@@ -80,6 +88,8 @@ ASR 和 LLM 都通过工厂创建（`createAsrProvider` / `createLlmProvider`）
 ## 恢复与兼容
 
 首次发现旧 JSON 存储时，系统先复制备份，再事务性迁移到 SQLite。完整导入会先创建当前 SQLite 快照，然后替换数据。旧 JSON 不会被自动删除。
+
+旧数据迁移时，每条既有 interview 创建一个独立 Application，保留原 interview ID 和所有子表关联。系统不按候选人姓名自动合并历史记录。现有 `create_interview`、`list_interviews`、`get_interview_context` 等接口继续可用，其中 interview 明确表示单轮；新增 Application 接口负责跨轮读取、新建下一轮和流程级产物。
 
 ## 目录职责
 

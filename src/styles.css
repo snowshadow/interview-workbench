@@ -439,6 +439,18 @@ h1 {
   color: var(--text-tertiary);
 }
 
+.current-round-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
 /* —— 状态徽章（tinted pill，无边框） —— */
 .session-status {
   display: inline-flex;
@@ -650,6 +662,118 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
 
 .management-actions > button {
   font-weight: 500;
+}
+
+.round-timeline {
+  flex: 0 0 auto;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--material-bar);
+  overflow: hidden;
+}
+
+.round-timeline-title {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.round-timeline-track {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.round-timeline-track::-webkit-scrollbar { display: none; }
+
+.round-step {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  display: grid;
+  grid-template-columns: 8px auto;
+  grid-template-rows: auto auto;
+  column-gap: 6px;
+  text-align: left;
+}
+
+.round-step:hover:not(:disabled),
+.round-step.selected { background: var(--accent-soft); }
+
+.round-step-dot {
+  grid-row: 1 / span 2;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.round-step-dot.active { background: var(--accent); }
+.round-step-dot.success { background: var(--success); }
+.round-step-dot.scheduled { background: var(--warning); }
+.round-step-dot.negative { background: var(--danger); }
+.round-step-dot.purple { background: #af52de; }
+
+.round-step > span:not(.round-step-dot) {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.round-step small {
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+}
+
+.round-connector {
+  flex: 0 0 14px;
+  height: 1px;
+  background: var(--border-strong);
+}
+
+.round-add-action {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 9px;
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.empty-workbench {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 48px 24px;
+  text-align: left;
+}
+
+.empty-workbench h2 {
+  margin: 0 0 7px;
+  font-size: 18px;
+}
+
+.empty-workbench p {
+  max-width: 520px;
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
 }
 
 /* 收音方式：macOS 分段控件 */
@@ -1744,6 +1868,10 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
   width: min(860px, 100%);
 }
 
+.interview-form-dialog.round-form-dialog {
+  width: min(640px, 100%);
+}
+
 .interview-calendar-dialog {
   position: relative;
   width: min(1280px, 100%);
@@ -1900,6 +2028,10 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
   transition: background 120ms ease;
 }
 
+.session-row.application-row {
+  grid-template-columns: minmax(135px, 0.9fr) minmax(170px, 1.25fr) 104px 100px 128px;
+}
+
 .session-row + .session-row {
   position: relative;
 }
@@ -1931,6 +2063,7 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
 
 .session-row-name,
 .session-row-role,
+.session-row-rounds,
 .session-row-time {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1943,6 +2076,7 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
 }
 
 .session-row-role,
+.session-row-rounds,
 .session-row-time {
   color: var(--text-secondary);
   font-size: 12.5px;
@@ -2590,7 +2724,41 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
 }
 
 .form-grid-basic {
-  grid-template-columns: minmax(180px, 1.2fr) minmax(130px, 0.75fr) minmax(185px, 0.9fr);
+  grid-template-columns: minmax(220px, 1.25fr) minmax(180px, 0.8fr);
+}
+
+.form-grid-round {
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+}
+
+.round-fields,
+.round-form-body {
+  display: grid;
+  gap: 12px;
+}
+
+.round-form-body {
+  padding-top: 18px;
+}
+
+.round-fields label,
+.round-form-body label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.round-fields label > span,
+.round-form-body label > span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.round-focus-field textarea {
+  min-height: 108px;
 }
 
 .form-grid-jd {

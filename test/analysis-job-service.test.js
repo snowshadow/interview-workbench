@@ -78,6 +78,7 @@ test("a client cannot advance the segment beyond persisted transcript lines", ()
     const job = fixture.service.enqueue({ ...jobInput(), segmentStart: -100, segmentEnd: 9999 });
     assert.equal(job.payload.segmentStart, 0);
     assert.equal(job.payload.segmentEnd, 2);
+    assert.equal(job.payload.currentRoundFocus, "验证本轮系统设计 ownership");
   } finally {
     fixture.close();
   }
@@ -86,7 +87,7 @@ test("a client cannot advance the segment beyond persisted transcript lines", ()
 function createFixture(provider) {
   const config = createTestConfig();
   const store = new SqliteStore(config, silentLogger);
-  store.createInterview(sampleInterview());
+  store.createInterview(sampleInterview({ roundFocus: "验证本轮系统设计 ownership" }));
   const service = new AnalysisJobService({
     store,
     provider,
@@ -112,6 +113,7 @@ function jobInput() {
     transcriptSlice: "面试官：请介绍项目\n候选人：我负责运行时",
     resumeMarkdown: "简历",
     roleMarkdown: "JD",
+    crossRoundBrief: "一面已确认运行时 ownership，二面继续验证失败恢复",
     askedQuestions: [],
     previousCards: [],
   };

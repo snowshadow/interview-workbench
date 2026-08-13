@@ -89,7 +89,7 @@ function currentHealth() {
     asrProvider: config.asr.provider,
     asrResourceId: config.asr.resourceId,
     storage: "sqlite",
-    schemaVersion: 4,
+    schemaVersion: 5,
     accessMode: config.accessToken ? "token" : "local-only",
     issues: [
       ...(!asrConfigured ? ["ASR_NOT_CONFIGURED"] : []),
@@ -125,10 +125,116 @@ app.put("/api/store", (req, res) => {
   }
 });
 
+app.post("/api/applications", (req, res) => {
+  try {
+    const applicationContext = storeRepository.createApplication(req.body || {});
+    const interview = applicationContext.rounds?.[0] || null;
+    const nextStore = storeRepository.getStore();
+    appendServerLog("application.created", {
+      applicationId: applicationContext.id,
+      interviewId: interview?.id || "",
+      status: applicationContext.applicationStatus,
+      roundCount: applicationContext.rounds?.length || 0,
+    });
+    res.status(201).json({
+      application: applicationContext,
+      interview,
+      store: nextStore,
+    });
+  } catch (error) {
+    appendServerLog("application.create_failed", { error: serializeError(error) });
+    const status = ["APPLICATION_ID_CONFLICT", "INTERVIEW_ID_CONFLICT"].includes(error.code)
+      ? 409
+      : 400;
+    res.status(status).json({ error: error.message || "创建应聘流程失败" });
+  }
+});
+
+app.get("/api/applications", (req, res) => {
+  const applications = storeRepository.listApplications({
+    query: req.query.query,
+    status: req.query.applicationStatus || req.query.status,
+    limit: req.query.limit,
+  });
+  res.json({ applications });
+});
+
+app.get("/api/applications/:applicationId/context", (req, res) => {
+  const application = storeRepository.getApplicationContext(req.params.applicationId);
+  if (!application) return res.status(404).json({ error: "应聘流程不存在" });
+  res.json({ application });
+});
+
+app.get("/api/applications/:applicationId", (req, res) => {
+  const application = storeRepository.getApplication(req.params.applicationId);
+  if (!application) return res.status(404).json({ error: "应聘流程不存在" });
+  res.json({ application });
+});
+
+app.patch("/api/applications/:applicationId", (req, res) => {
+  try {
+    const application = storeRepository.patchApplication(
+      req.params.applicationId,
+      req.body || {},
+    );
+    if (!application) return res.status(404).json({ error: "应聘流程不存在" });
+    res.json({ application });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "更新应聘流程失败" });
+  }
+});
+
+app.delete("/api/applications/:applicationId", (req, res) => {
+  const deleted = storeRepository.softDeleteApplication(req.params.applicationId);
+  if (!deleted) return res.status(404).json({ error: "应聘流程不存在" });
+  res.json({ ok: true });
+});
+
+app.post("/api/applications/:applicationId/rounds", (req, res) => {
+  try {
+    const interview = storeRepository.createInterviewRound(
+      req.params.applicationId,
+      req.body || {},
+    );
+    if (!interview) return res.status(404).json({ error: "应聘流程不存在" });
+    res.status(201).json({
+      interview,
+      application: storeRepository.getApplicationContext(req.params.applicationId),
+      store: storeRepository.getStore(),
+    });
+  } catch (error) {
+    const status = error.code === "INTERVIEW_ID_CONFLICT" ? 409 : 400;
+    res.status(status).json({ error: error.message || "创建面试轮次失败" });
+  }
+});
+
+app.get("/api/applications/:applicationId/artifacts", (req, res) => {
+  if (!storeRepository.getApplication(req.params.applicationId)) {
+    return res.status(404).json({ error: "应聘流程不存在" });
+  }
+  res.json({
+    artifacts: storeRepository.listApplicationArtifacts(req.params.applicationId),
+  });
+});
+
+app.put("/api/applications/:applicationId/artifacts/:kind", (req, res) => {
+  try {
+    const artifact = storeRepository.upsertApplicationArtifact(
+      req.params.applicationId,
+      { ...(req.body || {}), kind: req.params.kind },
+    );
+    if (!artifact) return res.status(404).json({ error: "应聘流程不存在" });
+    res.json({ artifact });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "保存流程产物失败" });
+  }
+});
+
 app.post("/api/interviews", (req, res) => {
   try {
     const interview = storeRepository.createInterview(req.body || {});
     const nextStore = storeRepository.getStore();
+    const application = storeRepository.getApplication(interview.applicationId);
     appendServerLog("interview.created", {
       interviewId: interview.id,
       name: interview.name,
@@ -137,10 +243,13 @@ app.post("/api/interviews", (req, res) => {
       roleChars: interview.roleMarkdown.length,
       resumeChars: interview.resumeMarkdown.length,
     });
-    res.status(201).json({ interview, store: nextStore });
+    res.status(201).json({ application, interview, store: nextStore });
   } catch (error) {
     appendServerLog("interview.create_failed", { error: serializeError(error) });
-    res.status(500).json({ error: error.message || "创建面试失败" });
+    const status = ["APPLICATION_ID_CONFLICT", "INTERVIEW_ID_CONFLICT"].includes(error.code)
+      ? 409
+      : 400;
+    res.status(status).json({ error: error.message || "创建面试失败" });
   }
 });
 
@@ -249,16 +358,31 @@ app.patch("/api/interviews/:interviewId", (req, res) => {
   try {
     const interview = storeRepository.patchInterview(req.params.interviewId, req.body || {});
     if (!interview) return res.status(404).json({ error: "面试场次不存在" });
-    res.json({ interview });
+    res.json({
+      interview,
+      application: storeRepository.getApplication(interview.applicationId),
+    });
   } catch (error) {
     res.status(400).json({ error: error.message || "更新面试失败" });
   }
 });
 
 app.delete("/api/interviews/:interviewId", (req, res) => {
-  const deleted = storeRepository.softDeleteInterview(req.params.interviewId);
-  if (!deleted) return res.status(404).json({ error: "面试场次不存在" });
-  res.json({ ok: true });
+  try {
+    const interview = storeRepository.getInterview(req.params.interviewId);
+    if (!interview) return res.status(404).json({ error: "面试场次不存在" });
+    const application = storeRepository.getApplicationContext(interview.applicationId);
+    if ((application?.rounds?.length || 0) <= 1) {
+      storeRepository.softDeleteApplication(interview.applicationId);
+      return res.json({ ok: true, archivedApplication: true });
+    }
+    const deleted = storeRepository.softDeleteInterview(req.params.interviewId);
+    if (!deleted) return res.status(404).json({ error: "面试场次不存在" });
+    res.json({ ok: true, archivedApplication: false });
+  } catch (error) {
+    const status = error.code === "LAST_ROUND" ? 409 : 400;
+    res.status(status).json({ error: error.message || "删除面试轮次失败" });
+  }
 });
 
 app.post("/api/interviews/:interviewId/lines", (req, res) => {
@@ -346,7 +470,10 @@ app.get("/api/export", (_req, res) => {
 app.post("/api/import", (req, res) => {
   try {
     const nextStore = storeRepository.importBackup(req.body?.store || req.body);
-    appendServerLog("store.imported", { interviews: nextStore.interviews.length });
+    appendServerLog("store.imported", {
+      applications: nextStore.applications?.length || 0,
+      interviews: nextStore.interviews.length,
+    });
     res.json({ ok: true, store: nextStore });
   } catch (error) {
     appendServerLog("store.import_failed", { error: serializeError(error) });
@@ -381,6 +508,11 @@ app.put("/api/status-options", (req, res) => {
 
 app.post("/api/analyze-jobs", (req, res) => {
   try {
+    const fallbackInterviewId = storeRepository.getStore().activeInterviewId;
+    const interviewId = req.body?.interviewId || fallbackInterviewId;
+    if (!storeRepository.getInterview(interviewId)) {
+      return res.status(404).json({ error: "面试场次不存在" });
+    }
     const payload = normalizeAnalyzePayload(req.body || {});
 
     if (!llmProvider.isConfigured()) {
@@ -393,10 +525,10 @@ app.post("/api/analyze-jobs", (req, res) => {
       return;
     }
 
-    const fallbackInterviewId = storeRepository.getStore().activeInterviewId;
     const job = analysisJobService.enqueue({
       ...payload,
-      interviewId: req.body?.interviewId || fallbackInterviewId,
+      interviewId,
+      crossRoundBrief: storeRepository.getCrossRoundContext(interviewId),
       cardId: req.body?.cardId,
       segmentStart: req.body?.segmentStart,
       segmentEnd: req.body?.segmentEnd,
