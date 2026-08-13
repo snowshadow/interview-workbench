@@ -22,9 +22,15 @@ const STATUS_COLOR_TONES = {
 };
 
 const DEFAULT_STATUS_COLORS = {
+  招聘中: "blue",
+  通过: "green",
   未面: "gray",
+  待安排: "gray",
   已安排: "amber",
   面试中: "blue",
+  进行中: "blue",
+  已结束: "gray",
+  已取消: "red",
   已面待定: "gray",
   一面通过: "green",
   未通过: "red",
@@ -46,6 +52,70 @@ export function inferInterviewStatus(interview) {
     interview?.sessionStartedAt
     ? "已面待定"
     : "未面";
+}
+
+export function inferRoundStatus(interview) {
+  if (interview?.roundStatus) return normalizeStatusLabel(interview.roundStatus);
+  if (interview?.lines?.length || interview?.transcriptLineCount || interview?.sessionStartedAt) {
+    return "已结束";
+  }
+  return interview?.scheduledAt ? "已安排" : "待安排";
+}
+
+export function roundLabelFor(interview) {
+  const explicit = normalizeStatusLabel(interview?.roundLabel);
+  if (explicit) return explicit;
+  const order = Math.max(1, Number(interview?.roundOrder) || 1);
+  const commonLabels = ["一面", "二面", "三面", "四面", "五面"];
+  return commonLabels[order - 1] || `第 ${order} 轮`;
+}
+
+export function roundDisplayName(interview) {
+  return `${interview?.name || "未命名候选人"} · ${roundLabelFor(interview)}`;
+}
+
+export function compareRounds(left, right) {
+  const orderDifference = (Number(left?.roundOrder) || 0) - (Number(right?.roundOrder) || 0);
+  if (orderDifference) return orderDifference;
+  return new Date(left?.createdAt || 0).getTime() - new Date(right?.createdAt || 0).getTime();
+}
+
+export function roundsForApplication(interviews, applicationId) {
+  return (Array.isArray(interviews) ? interviews : [])
+    .filter((interview) => interview.applicationId === applicationId)
+    .sort(compareRounds);
+}
+
+export function preferredRoundForApplication(interviews, applicationId, now = new Date()) {
+  const rounds = roundsForApplication(interviews, applicationId);
+  if (!rounds.length) return null;
+  const nowTime = new Date(now).getTime();
+  return (
+    rounds.find((round) => {
+      const scheduledTime = new Date(round.scheduledAt || "").getTime();
+      return Number.isFinite(scheduledTime) && scheduledTime >= nowTime && inferRoundStatus(round) !== "已取消";
+    }) || rounds.at(-1)
+  );
+}
+
+export function getApplicationRole(application) {
+  return application?.jdDraftName?.trim() || "未设置岗位";
+}
+
+export function compareApplications(left, right, sortBy, interviews = []) {
+  if (sortBy === "name") return (left.name || "").localeCompare(right.name || "", "zh-CN");
+  const applicationRounds = (application) => roundsForApplication(interviews, application.id);
+  const dateValue = (application) => {
+    if (sortBy === "scheduled") {
+      return preferredRoundForApplication(interviews, application.id)?.scheduledAt || "9999-12-31";
+    }
+    if (sortBy === "created") return application.createdAt || 0;
+    const rounds = applicationRounds(application);
+    return application.updatedAt || rounds.at(-1)?.updatedAt || application.createdAt || 0;
+  };
+  const leftDate = new Date(dateValue(left)).getTime();
+  const rightDate = new Date(dateValue(right)).getTime();
+  return sortBy === "scheduled" ? leftDate - rightDate : rightDate - leftDate;
 }
 
 export function formatShortDateTime(value) {

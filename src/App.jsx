@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Archive,
   BriefcaseBusiness,
   CalendarClock,
   CalendarDays,
@@ -42,9 +43,11 @@ import {
 import { ResumeDocument } from "./components/resume/ResumeDocument.jsx";
 import {
   formatShortDateTime,
-  inferInterviewStatus,
+  inferRoundStatus,
   interviewStatusTone,
   normalizeStatusLabel,
+  roundLabelFor,
+  roundsForApplication,
   STATUS_COLOR_OPTIONS,
   statusColorFor,
 } from "./interview-domain.js";
@@ -65,9 +68,10 @@ import {
 } from "./audio-capture.js";
 import {
   DEFAULT_INTERVIEW_STATUSES,
+  DEFAULT_ROUND_STATUSES,
   STORE_KEY,
+  applicationMetadataPatch,
   clearLegacyInterviewStore,
-  createInterview,
   interviewMetadataPatch,
   loadRemoteInterviewStore,
   mergeStatusOptions,
@@ -109,6 +113,39 @@ if (!Promise.withResolvers) {
 }
 
 const UI_PREF_KEY = "interview-workbench.ui.v1";
+const EMPTY_APPLICATION = {
+  id: "",
+  name: "",
+  applicationStatus: "",
+  resumeMarkdown: "",
+  roleMarkdown: "",
+  resumeFile: null,
+  resumeNotes: [],
+  selectedJdId: "",
+  jdDraftName: "",
+};
+const EMPTY_INTERVIEW = {
+  id: "",
+  applicationId: "",
+  name: "",
+  scheduledAt: "",
+  sessionStartedAt: null,
+  roundOrder: 1,
+  roundLabel: "",
+  roundStatus: "待安排",
+  outcome: "",
+  roundFocus: "",
+  resumeMarkdown: "",
+  roleMarkdown: "",
+  resumeFile: null,
+  resumeNotes: [],
+  jdDraftName: "",
+  lines: [],
+  cards: [],
+  askedQuestions: [],
+  lastProcessedLineCount: 0,
+  speakerLabels: {},
+};
 
 function App() {
   const [store, setStore] = useState(loadInterviewStore);
@@ -165,6 +202,7 @@ function App() {
   const workspaceResizeRef = useRef(null);
   const captureAttemptRef = useRef("");
   const metadataPersistTimersRef = useRef(new Map());
+  const applicationPersistTimersRef = useRef(new Map());
   const retryAnalysisCardRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
@@ -172,12 +210,25 @@ function App() {
   const activeInterview = useMemo(() => {
     return (
       store.interviews.find((interview) => interview.id === store.activeInterviewId) ||
-      store.interviews[0]
+      store.interviews[0] ||
+      EMPTY_INTERVIEW
     );
   }, [store]);
+  const activeApplication = useMemo(
+    () =>
+      store.applications.find(
+        (application) => application.id === activeInterview.applicationId,
+      ) || (activeInterview.id ? activeInterview : EMPTY_APPLICATION),
+    [activeInterview, store.applications],
+  );
+  const hasActiveInterview = Boolean(activeInterview.id);
+  const activeRounds = useMemo(
+    () => roundsForApplication(store.interviews, activeInterview.applicationId),
+    [activeInterview.applicationId, store.interviews],
+  );
   const statusOptions = useMemo(
-    () => mergeStatusOptions(store.statusOptions, store.interviews),
-    [store.interviews, store.statusOptions],
+    () => mergeStatusOptions(store.statusOptions, store.applications),
+    [store.applications, store.statusOptions],
   );
 
   const {
@@ -188,15 +239,19 @@ function App() {
     resumeFile,
     resumeNotes: savedResumeNotes,
     jdDraftName,
-    interviewStatus,
     scheduledAt,
     sessionStartedAt,
+    roundStatus,
+    outcome,
+    roundFocus,
     lines,
     cards,
     askedQuestions,
     lastProcessedLineCount,
     speakerLabels,
   } = activeInterview;
+  const interviewStatus =
+    activeApplication.applicationStatus || activeInterview.interviewStatus || "招聘中";
   const resumeNotes = Array.isArray(savedResumeNotes) ? savedResumeNotes : [];
 
   useEffect(() => {
@@ -302,7 +357,10 @@ function App() {
       if (!["idle", "stopped", "error"].includes(statusRef.current)) return;
       // 本地还有未落库的场次修改（如刚删除的备注）时跳过，
       // 否则远端旧快照会把这次修改覆盖回来。
-      if (metadataPersistTimersRef.current.size > 0) return;
+      if (
+        metadataPersistTimersRef.current.size > 0 ||
+        applicationPersistTimersRef.current.size > 0
+      ) return;
       loadRemoteInterviewStore()
         .then((remoteStore) => {
           if (remoteStore) {
@@ -357,8 +415,9 @@ function App() {
     [cards, lastProcessedLineCount, lines.length],
   );
 
-  const canSwitchInterview =
-    status === "idle" || status === "stopped" || status === "error";
+  const canManageWorkbench =
+    storeReady && (status === "idle" || status === "stopped" || status === "error");
+  const canSwitchInterview = canManageWorkbench && hasActiveInterview;
   const canMarkResume = Boolean(
     resumeFile &&
       (isPdfFile(resumeFile) || (isWordFile(resumeFile) && resumeFile.previewText)),
@@ -415,21 +474,51 @@ function App() {
     setStore((prev) => {
       const updatedAt = new Date().toISOString();
       let changedInterview = null;
-      const interviews = prev.interviews.map((interview) => {
+      let interviews = prev.interviews.map((interview) => {
         if (interview.id !== prev.activeInterviewId) return interview;
         const patch = typeof updater === "function" ? updater(interview) : updater;
         changedInterview = { ...interview, ...patch, updatedAt };
         return changedInterview;
       });
-      if (changedInterview) scheduleInterviewMetadataPersist(changedInterview);
+      let applications = prev.applications;
+      let changedApplication = null;
+      if (changedInterview) {
+        const currentApplication = prev.applications.find(
+          (application) => application.id === changedInterview.applicationId,
+        );
+        if (currentApplication) {
+          const sharedPatch = applicationMetadataPatch(changedInterview);
+          const sharedChanged = Object.entries(sharedPatch).some(
+            ([key, value]) => currentApplication[key] !== value,
+          );
+          if (sharedChanged) {
+            changedApplication = { ...currentApplication, ...sharedPatch, updatedAt };
+            applications = prev.applications.map((application) =>
+              application.id === changedApplication.id ? changedApplication : application,
+            );
+            interviews = interviews.map((interview) =>
+              interview.applicationId === changedApplication.id
+                ? {
+                    ...interview,
+                    ...sharedPatch,
+                    applicationStatus: changedApplication.applicationStatus,
+                    interviewStatus: changedApplication.applicationStatus,
+                  }
+                : interview,
+            );
+          }
+        }
+        scheduleInterviewMetadataPersist(changedInterview, changedApplication);
+      }
       return {
         ...prev,
+        applications,
         interviews,
       };
     });
   }
 
-  function scheduleInterviewMetadataPersist(interview) {
+  function scheduleInterviewMetadataPersist(interview, application = null) {
     const existing = metadataPersistTimersRef.current.get(interview.id);
     if (existing) window.clearTimeout(existing);
     const timer = window.setTimeout(async () => {
@@ -440,7 +529,7 @@ function App() {
         });
         setPersistError("");
       } catch {
-        setPersistError("场次保存失败，请先导出 Markdown 兜底");
+        setPersistError("当前轮次保存失败，请先导出 Markdown 兜底");
       } finally {
         // 请求结束后再移除，focus 刷新守卫要覆盖到请求完成为止；
         // 期间若重新调度过，map 里已是新 timer，不能误删。
@@ -450,29 +539,61 @@ function App() {
       }
     }, 350);
     metadataPersistTimersRef.current.set(interview.id, timer);
+    if (application) scheduleApplicationMetadataPersist(application);
   }
 
-  function applyActiveInterviewStatus(value, { keepPickerOpen = false } = {}) {
+  function scheduleApplicationMetadataPersist(application) {
+    const existing = applicationPersistTimersRef.current.get(application.id);
+    if (existing) window.clearTimeout(existing);
+    const timer = window.setTimeout(async () => {
+      try {
+        await requestJson(`/api/applications/${encodeURIComponent(application.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify(applicationMetadataPatch(application)),
+        });
+        setPersistError("");
+      } catch {
+        setPersistError("应聘流程资料保存失败，请先导出 Markdown 兜底");
+      } finally {
+        if (applicationPersistTimersRef.current.get(application.id) === timer) {
+          applicationPersistTimersRef.current.delete(application.id);
+        }
+      }
+    }, 350);
+    applicationPersistTimersRef.current.set(application.id, timer);
+  }
+
+  function applyActiveApplicationStatus(value, { keepPickerOpen = false } = {}) {
     const nextStatus = normalizeStatusLabel(value);
     if (!nextStatus) return;
     setStore((prev) => {
       const updatedAt = new Date().toISOString();
       return {
         ...prev,
-        statusOptions: mergeStatusOptions(prev.statusOptions, [nextStatus], prev.interviews),
+        statusOptions: mergeStatusOptions(prev.statusOptions, [nextStatus], prev.applications),
+        applications: prev.applications.map((application) =>
+          application.id === activeApplication.id
+            ? { ...application, applicationStatus: nextStatus, updatedAt }
+            : application,
+        ),
         interviews: prev.interviews.map((interview) =>
-          interview.id === prev.activeInterviewId
-            ? { ...interview, interviewStatus: nextStatus, updatedAt }
+          interview.applicationId === activeApplication.id
+            ? {
+                ...interview,
+                applicationStatus: nextStatus,
+                interviewStatus: nextStatus,
+                updatedAt,
+              }
             : interview,
         ),
       };
     });
     setCustomStatusDraft("");
     setStatusPickerOpen(keepPickerOpen);
-    requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}`, {
+    requestJson(`/api/applications/${encodeURIComponent(activeApplication.id)}`, {
       method: "PATCH",
-      body: JSON.stringify({ interviewStatus: nextStatus }),
-    }).catch(() => setPersistError("面试状态保存失败"));
+      body: JSON.stringify({ applicationStatus: nextStatus }),
+    }).catch(() => setPersistError("应聘流程状态保存失败"));
   }
 
   function applyStatusColor(color) {
@@ -539,22 +660,38 @@ function App() {
   }
 
   function openInterviewForm(mode) {
-    if (!canSwitchInterview) return;
+    if (!canManageWorkbench) return;
+    if (mode !== "create-application" && !hasActiveInterview) return;
     setError("");
     setSessionMenuOpen(false);
-    const source = mode === "edit" ? activeInterview : null;
+    const usesApplication = mode === "edit-application";
+    const usesRound = mode === "edit-round";
+    const sourceApplication = usesApplication ? activeApplication : null;
+    const sourceRound = usesRound ? activeInterview : null;
+    const nextRoundOrder = Math.max(0, ...activeRounds.map((round) => Number(round.roundOrder) || 0)) + 1;
     setInterviewForm({
       mode,
-      name: source?.name === "未命名面试" ? "" : source?.name || "",
-      interviewStatus: source?.interviewStatus || "未面",
-      scheduledAt: toDatetimeLocalValue(source?.scheduledAt),
-      selectedJdId: source?.selectedJdId || "",
-      jdDraftName: source?.jdDraftName || "",
-      roleMarkdown: source?.roleMarkdown || "",
-      resumeMarkdown: source?.resumeMarkdown || "",
-      resumeFile: source?.resumeFile || null,
+      applicationId: activeApplication.id,
+      name:
+        sourceApplication?.name === "未命名候选人"
+          ? ""
+          : sourceApplication?.name || "",
+      applicationStatus: sourceApplication?.applicationStatus || "招聘中",
+      selectedJdId: sourceApplication?.selectedJdId || "",
+      jdDraftName: sourceApplication?.jdDraftName || "",
+      roleMarkdown: sourceApplication?.roleMarkdown || "",
+      resumeMarkdown: sourceApplication?.resumeMarkdown || "",
+      resumeFile: sourceApplication?.resumeFile || null,
       resumeFileChanged: false,
       saveJdToLibrary: false,
+      roundOrder: sourceRound?.roundOrder || nextRoundOrder,
+      roundLabel:
+        sourceRound?.roundLabel ||
+        roundLabelFor({ roundOrder: mode === "create-application" ? 1 : nextRoundOrder }),
+      roundStatus: sourceRound?.roundStatus || "待安排",
+      outcome: sourceRound?.outcome || "",
+      roundFocus: sourceRound?.roundFocus || "",
+      scheduledAt: toDatetimeLocalValue(sourceRound?.scheduledAt),
     });
   }
 
@@ -624,78 +761,114 @@ function App() {
   }
 
   async function submitInterviewForm() {
-    if (!interviewForm || !canSwitchInterview) return;
+    if (!interviewForm || !canManageWorkbench) return;
+    if (interviewForm.mode !== "create-application" && !hasActiveInterview) return;
     if (interviewFormSubmitLockRef.current) return;
-    const name = interviewForm.name.trim();
-    if (!name) {
-      setError("请填写候选人姓名");
+    const isRoundForm = ["create-round", "edit-round"].includes(interviewForm.mode);
+    const roundLabelValue = normalizeStatusLabel(interviewForm.roundLabel);
+    if (!roundLabelValue) {
+      setError("请填写轮次名称");
       return;
     }
-    const interviewStatusValue = normalizeStatusLabel(interviewForm.interviewStatus);
-    if (!interviewStatusValue) {
-      setError("请填写面试状态");
-      return;
-    }
-
-    const roleMarkdownValue = interviewForm.roleMarkdown.trim();
-    const jdName =
-      interviewForm.jdDraftName.trim() ||
-      extractMarkdownTitle(roleMarkdownValue) ||
-      "";
-    let nextJdId = interviewForm.selectedJdId || "";
     setError("");
     interviewFormSubmitLockRef.current = true;
     setInterviewFormSubmitting(true);
     try {
-      if (interviewForm.saveJdToLibrary && roleMarkdownValue) {
-        const existing = nextJdId
-          ? store.jdLibrary.find((item) => item.id === nextJdId)
-          : null;
-        const { jd } = await requestJson("/api/jds", {
-          method: "POST",
-          body: JSON.stringify({
-            id: existing?.id || safeId(),
-            name: jdName || existing?.name || `JD ${store.jdLibrary.length + 1}`,
-            content: roleMarkdownValue,
-            createdAt: existing?.createdAt,
-          }),
-        });
-        nextJdId = jd.id;
-      }
-
-      const patch = {
-        name,
-        interviewStatus: interviewStatusValue,
+      const scheduledAtValue = fromDatetimeLocalValue(interviewForm.scheduledAt);
+      const roundPatch = {
         scheduledAt: fromDatetimeLocalValue(interviewForm.scheduledAt),
-        selectedJdId: nextJdId,
-        jdDraftName: jdName,
-        roleMarkdown: roleMarkdownValue,
-        resumeMarkdown: interviewForm.resumeMarkdown,
-        ...(interviewForm.resumeFileChanged ? { resumeNotes: [] } : {}),
+        roundLabel: roundLabelValue,
+        roundStatus:
+          interviewForm.mode === "edit-round"
+            ? interviewForm.roundStatus
+            : scheduledAtValue
+              ? "已安排"
+              : "待安排",
+        outcome: normalizeStatusLabel(interviewForm.outcome),
+        roundFocus: interviewForm.roundFocus.trim(),
       };
 
       let nextActiveId = activeInterviewId;
-      if (interviewForm.mode === "create") {
-        const data = await requestJson("/api/interviews", {
-          method: "POST",
-          body: JSON.stringify({ ...patch, resumeFile: interviewForm.resumeFile, activate: true }),
-        });
-        nextActiveId = data.interview.id;
-      } else {
+      if (interviewForm.mode === "create-round") {
+        const data = await requestJson(
+          `/api/applications/${encodeURIComponent(activeApplication.id)}/rounds`,
+          {
+            method: "POST",
+            body: JSON.stringify({ ...roundPatch, activate: true }),
+          },
+        );
+        nextActiveId = data.interview?.id || nextActiveId;
+      } else if (interviewForm.mode === "edit-round") {
         await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}`, {
           method: "PATCH",
-          body: JSON.stringify(patch),
+          body: JSON.stringify(roundPatch),
         });
-        if (interviewForm.resumeFileChanged) {
-          if (interviewForm.resumeFile) {
-            await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}/resume`, {
-              method: "PUT",
-              body: JSON.stringify({ resumeFile: interviewForm.resumeFile }),
-            });
-          } else {
-            await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}/resume`, {
-              method: "DELETE",
-            });
+      } else {
+        const name = interviewForm.name.trim();
+        if (!name) throw new Error("请填写候选人姓名");
+        const applicationStatusValue = normalizeStatusLabel(interviewForm.applicationStatus);
+        if (!applicationStatusValue) throw new Error("请填写应聘流程状态");
+        const roleMarkdownValue = interviewForm.roleMarkdown.trim();
+        const jdName =
+          interviewForm.jdDraftName.trim() ||
+          extractMarkdownTitle(roleMarkdownValue) ||
+          "";
+        let nextJdId = interviewForm.selectedJdId || "";
+
+        if (interviewForm.saveJdToLibrary && roleMarkdownValue) {
+          const existing = nextJdId
+            ? store.jdLibrary.find((item) => item.id === nextJdId)
+            : null;
+          const { jd } = await requestJson("/api/jds", {
+            method: "POST",
+            body: JSON.stringify({
+              id: existing?.id || safeId(),
+              name: jdName || existing?.name || `JD ${store.jdLibrary.length + 1}`,
+              content: roleMarkdownValue,
+              createdAt: existing?.createdAt,
+            }),
+          });
+          nextJdId = jd.id;
+        }
+
+        const applicationPatch = {
+          name,
+          applicationStatus: applicationStatusValue,
+          selectedJdId: nextJdId,
+          jdDraftName: jdName,
+          roleMarkdown: roleMarkdownValue,
+          resumeMarkdown: interviewForm.resumeMarkdown,
+          ...(interviewForm.resumeFileChanged ? { resumeNotes: [] } : {}),
+        };
+
+        if (interviewForm.mode === "create-application") {
+          const data = await requestJson("/api/applications", {
+            method: "POST",
+            body: JSON.stringify({
+              ...applicationPatch,
+              ...roundPatch,
+              firstRound: roundPatch,
+              resumeFile: interviewForm.resumeFile,
+              activate: true,
+            }),
+          });
+          nextActiveId = data.interview?.id || data.application?.rounds?.[0]?.id || nextActiveId;
+        } else {
+          await requestJson(`/api/applications/${encodeURIComponent(activeApplication.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify(applicationPatch),
+          });
+          if (interviewForm.resumeFileChanged) {
+            if (interviewForm.resumeFile) {
+              await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}/resume`, {
+                method: "PUT",
+                body: JSON.stringify({ resumeFile: interviewForm.resumeFile }),
+              });
+            } else {
+              await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}/resume`, {
+                method: "DELETE",
+              });
+            }
           }
         }
       }
@@ -703,44 +876,85 @@ function App() {
       const remoteStore = await loadRemoteInterviewStore();
       if (remoteStore) {
         setStore((current) =>
-          withLocalTranscripts({ ...remoteStore, activeInterviewId: nextActiveId }, current),
+          withLocalTranscripts(
+            preserveActiveInterview(remoteStore, nextActiveId),
+            current,
+          ),
         );
       }
       partialTextBridge.set("");
       setInterviewForm(null);
       setPersistError("");
     } catch (err) {
-      setError(err.message || "保存面试失败");
+      setError(err.message || (isRoundForm ? "保存轮次失败" : "保存应聘流程失败"));
     } finally {
       interviewFormSubmitLockRef.current = false;
       setInterviewFormSubmitting(false);
     }
   }
 
-  async function deleteActiveInterview() {
+  async function deleteActiveRound() {
+    if (!canSwitchInterview || activeRounds.length <= 1) return;
+    if (!window.confirm(`确认删除“${roundLabelFor(activeInterview)}”？该轮的转录和分析将移入本机回收状态。`)) {
+      return;
+    }
+    partialTextBridge.set("");
+    setError("");
+    setSessionMenuOpen(false);
+    const currentRoundIndex = activeRounds.findIndex((round) => round.id === activeInterviewId);
+    const adjacentRound =
+      activeRounds[currentRoundIndex - 1] || activeRounds[currentRoundIndex + 1];
+    let deleted = false;
+    try {
+      await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}`, {
+        method: "DELETE",
+      });
+      deleted = true;
+      try {
+        await requestJson(`/api/interviews/${encodeURIComponent(adjacentRound.id)}/active`, {
+          method: "PUT",
+        });
+        setPersistError("");
+      } catch {
+        setPersistError("轮次已删除，但当前轮次同步失败");
+      }
+      const remoteStore = await loadRemoteInterviewStore();
+      if (remoteStore) {
+        setStore((current) =>
+          withLocalTranscripts(
+            preserveActiveInterview(remoteStore, adjacentRound.id),
+            current,
+          ),
+        );
+      }
+      hydrateInterviewTranscript(adjacentRound.id);
+    } catch (err) {
+      setError(
+        deleted
+          ? "轮次已删除，但工作台刷新失败，请重新打开页面"
+          : err.message || "删除当前轮失败",
+      );
+    }
+  }
+
+  async function archiveActiveApplication() {
     if (!canSwitchInterview) return;
-    if (!window.confirm(`确认删除“${interviewName || "未命名面试"}”？此操作会移入本机回收状态。`)) {
+    if (!window.confirm(`确认归档“${interviewName || "未命名候选人"}”的整个应聘流程？所有轮次将从工作台隐藏。`)) {
       return;
     }
     partialTextBridge.set("");
     setError("");
     setSessionMenuOpen(false);
     try {
-      await requestJson(`/api/interviews/${encodeURIComponent(activeInterviewId)}`, {
+      await requestJson(`/api/applications/${encodeURIComponent(activeApplication.id)}`, {
         method: "DELETE",
       });
-      if (store.interviews.length <= 1) {
-        await requestJson("/api/interviews", {
-          method: "POST",
-          body: JSON.stringify({ name: "未命名面试", interviewStatus: "未面" }),
-        });
-      }
       const remoteStore = await loadRemoteInterviewStore();
       if (remoteStore) {
         setStore((current) => withLocalTranscripts(remoteStore, current));
       }
     } catch (err) {
-      setError(err.message || "删除面试失败");
+      setError(err.message || "归档应聘流程失败");
     }
   }
 
@@ -874,6 +1088,7 @@ function App() {
   }
 
   async function startInterview() {
+    if (!canSwitchInterview || !activeInterviewId) return;
     const captureAttemptId = safeId();
     captureAttemptRef.current = captureAttemptId;
     setError("");
@@ -925,7 +1140,7 @@ function App() {
 
       updateActiveInterview((interview) => ({
         sessionStartedAt: interview.sessionStartedAt || new Date().toISOString(),
-        interviewStatus: "面试中",
+        roundStatus: "进行中",
       }));
 
       reconnectAttemptRef.current = 0;
@@ -1136,12 +1351,7 @@ function App() {
     commitPartialTranscript();
     setStatus("stopped");
     setIsPaused(false);
-    updateActiveInterview((interview) => ({
-      interviewStatus:
-        interview.interviewStatus === "面试中"
-          ? "已面待定"
-          : interview.interviewStatus || inferInterviewStatus(interview),
-    }));
+    updateActiveInterview({ roundStatus: "已结束" });
     const socket = wsRef.current;
     try {
       if (socket?.readyState === WebSocket.OPEN) {
@@ -1358,7 +1568,11 @@ function App() {
     const content = [
       `# ${interviewName || "面试记录"}`,
       "",
-      `面试状态：${interviewStatus || "未面"}`,
+      `应聘流程状态：${interviewStatus || "招聘中"}`,
+      `面试轮次：${roundLabelFor(activeInterview)}`,
+      `轮次状态：${roundStatus || inferRoundStatus(activeInterview)}`,
+      `本轮结果：${outcome || "未填写"}`,
+      `本轮重点：${roundFocus || "未填写"}`,
       `计划面试时间：${formatDateTime(scheduledAt) || "未设置"}`,
       `开始时间：${sessionStartedAt ? new Date(sessionStartedAt).toLocaleString() : "未开始"}`,
       "",
@@ -1402,7 +1616,7 @@ function App() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${sanitizeFilename(interviewName || "面试记录")}-${new Date()
+    anchor.download = `${sanitizeFilename(`${interviewName || "面试记录"}-${roundLabelFor(activeInterview)}`)}-${new Date()
       .toISOString()
       .slice(0, 19)}.md`;
     anchor.click();
@@ -1549,9 +1763,11 @@ function App() {
           </div>
         </div>
 
-        <section className="active-session-summary" aria-label="当前场次">
-          <div className="active-session-name">{interviewName || "未命名面试"}</div>
-          <div className="active-session-meta">
+        <section className="active-session-summary" aria-label="当前面试流程">
+          <div className="active-session-name">
+            {hasActiveInterview ? interviewName || "未命名候选人" : "尚无面试流程"}
+          </div>
+          {hasActiveInterview ? <div className="active-session-meta">
             <span className="session-role">
               <BriefcaseBusiness size={14} />
               {jdDraftName || "未设置岗位"}
@@ -1564,7 +1780,7 @@ function App() {
                 )}`}
                 disabled={!canSwitchInterview}
                 onClick={() => setStatusPickerOpen((open) => !open)}
-                title="修改面试状态"
+                title="修改应聘流程状态"
               >
                 {interviewStatus || "未面"}
               </button>
@@ -1580,7 +1796,7 @@ function App() {
                           statusOption === interviewStatus ? "selected" : ""
                         }`}
                         key={statusOption}
-                        onClick={() => applyActiveInterviewStatus(statusOption)}
+                        onClick={() => applyActiveApplicationStatus(statusOption)}
                         type="button"
                       >
                         {statusOption}
@@ -1591,7 +1807,7 @@ function App() {
                     className="status-picker-custom"
                     onSubmit={(event) => {
                       event.preventDefault();
-                      applyActiveInterviewStatus(customStatusDraft, { keepPickerOpen: true });
+                      applyActiveApplicationStatus(customStatusDraft, { keepPickerOpen: true });
                     }}
                   >
                     <input
@@ -1632,17 +1848,18 @@ function App() {
                 </div>
               ) : null}
             </div>
+            <span className="current-round-label">{roundLabelFor(activeInterview)}</span>
             <span className="session-time">
               <CalendarClock size={14} />
               {formatShortDateTime(scheduledAt) || "未安排时间"}
             </span>
-          </div>
+          </div> : <div className="active-session-meta">新建流程后即可安排首轮面试</div>}
         </section>
 
         <div className="management-actions">
           <StatusPill health={health} />
           <button
-            disabled={!canSwitchInterview}
+            disabled={!canManageWorkbench}
             onClick={openProviderSettings}
             title="配置语音识别和大模型"
           >
@@ -1650,7 +1867,7 @@ function App() {
             配置
           </button>
           <button
-            disabled={!canSwitchInterview}
+            disabled={!canManageWorkbench}
             onClick={() => setCalendarOpen(true)}
             title="预览面试安排"
           >
@@ -1658,18 +1875,18 @@ function App() {
             日历
           </button>
           <button
-            disabled={!canSwitchInterview}
+            disabled={!canManageWorkbench}
             onClick={() => setSessionLibraryOpen(true)}
-            title="浏览和筛选场次"
+            title="浏览和筛选面试流程"
           >
             <ListFilter size={17} />
-            场次库
+            流程库
           </button>
           <button
             className="primary"
-            disabled={!canSwitchInterview}
-            onClick={() => openInterviewForm("create")}
-            title="新建面试"
+            disabled={!canManageWorkbench}
+            onClick={() => openInterviewForm("create-application")}
+            title="新建面试流程"
           >
             <Plus size={17} />
             新建
@@ -1679,16 +1896,24 @@ function App() {
               className="icon-button"
               disabled={!canSwitchInterview}
               onClick={() => setSessionMenuOpen((open) => !open)}
-              title="当前场次操作"
-              aria-label="当前场次操作"
+              title="当前流程与轮次操作"
+              aria-label="当前流程与轮次操作"
             >
               <Ellipsis size={19} />
             </button>
             {sessionMenuOpen ? (
               <div className="session-menu-popover">
-                <button onClick={() => openInterviewForm("edit")}>
+                <button onClick={() => openInterviewForm("edit-application")}>
                   <Pencil size={16} />
-                  编辑资料
+                  编辑应聘流程
+                </button>
+                <button onClick={() => openInterviewForm("edit-round")}>
+                  <Pencil size={16} />
+                  编辑当前轮
+                </button>
+                <button onClick={() => openInterviewForm("create-round")}>
+                  <Plus size={16} />
+                  安排下一轮
                 </button>
                 <button
                   onClick={() => {
@@ -1707,9 +1932,18 @@ function App() {
                   <Upload size={16} />
                   导入完整备份
                 </button>
-                <button className="danger-action" onClick={deleteActiveInterview}>
+                <button
+                  className="danger-action"
+                  disabled={activeRounds.length <= 1}
+                  onClick={deleteActiveRound}
+                  title={activeRounds.length <= 1 ? "唯一一轮不能删除，请归档整个流程" : "只删除当前轮"}
+                >
                   <Trash2 size={16} />
-                  删除场次
+                  删除当前轮
+                </button>
+                <button className="danger-action" onClick={archiveActiveApplication}>
+                  <Archive size={16} />
+                  归档整个流程
                 </button>
               </div>
             ) : null}
@@ -1746,7 +1980,12 @@ function App() {
           </div>
           <span className="toolbar-separator" />
           {status === "idle" || status === "stopped" || status === "error" ? (
-            <button className="primary" onClick={startInterview} title="开始面试">
+            <button
+              className="primary"
+              disabled={!canSwitchInterview}
+              onClick={startInterview}
+              title="开始面试"
+            >
               <Play size={17} />
               开始
             </button>
@@ -1765,6 +2004,29 @@ function App() {
         </div>
       </header>
 
+      {hasActiveInterview ? <RoundTimeline
+        activeInterviewId={activeInterviewId}
+        canSwitch={canSwitchInterview}
+        onAdd={() => openInterviewForm("create-round")}
+        onSelect={switchInterview}
+        rounds={activeRounds}
+        statusColors={store.statusColors}
+      /> : <section className="empty-workbench" role="status">
+        <div>
+          <h2>{storeReady ? "还没有面试流程" : "正在读取面试流程"}</h2>
+          <p>{storeReady ? "先建立候选人应聘流程，并在同一流程下继续安排二面、终面或加面。" : "请稍候。"}</p>
+        </div>
+        {storeReady ? <button
+          className="primary"
+          disabled={!canManageWorkbench}
+          onClick={() => openInterviewForm("create-application")}
+          type="button"
+        >
+          <Plus size={16} />
+          新建面试流程
+        </button> : null}
+      </section>}
+
       {error || persistError ? <div className="error">{error || persistError}</div> : null}
 
       {health && health.ok && (!health.asrConfigured || !health.llmConfigured) ? (
@@ -1776,7 +2038,7 @@ function App() {
                 ? "语音识别"
                 : "大模型"}尚未配置。
           </span>
-          <button disabled={!canSwitchInterview} onClick={openProviderSettings}>
+          <button disabled={!canManageWorkbench} onClick={openProviderSettings}>
             <Settings size={15} />
             打开配置
           </button>
@@ -1819,6 +2081,7 @@ function App() {
       {sessionLibraryOpen ? (
         <SessionLibraryDialog
           activeInterviewId={activeInterviewId}
+          applications={store.applications}
           interviews={store.interviews}
           onClose={() => setSessionLibraryOpen(false)}
           onSelect={switchInterview}
@@ -1845,6 +2108,7 @@ function App() {
           onResumeFileChange={handleInterviewFormResumeFileChange}
           onSelectJd={selectFormJd}
           onSubmit={submitInterviewForm}
+          roundStatusOptions={DEFAULT_ROUND_STATUSES}
           statusOptions={statusOptions}
           submitting={interviewFormSubmitting}
         />
@@ -1866,7 +2130,7 @@ function App() {
         />
       ) : null}
 
-      <section
+      {hasActiveInterview ? <section
         className="workspace interview-workspace"
         ref={workspaceRef}
         style={{ "--resume-pane-width": `${workspaceSplit}%` }}
@@ -2106,8 +2370,55 @@ function App() {
             speakerLabels={speakerLabels}
           />
         </section>
-      </section>
+      </section> : null}
     </main>
+  );
+}
+
+function RoundTimeline({
+  activeInterviewId,
+  canSwitch,
+  onAdd,
+  onSelect,
+  rounds,
+  statusColors,
+}) {
+  return (
+    <nav className="round-timeline" aria-label="面试轮次">
+      <span className="round-timeline-title">面试轮次</span>
+      <div className="round-timeline-track">
+        {rounds.map((round, index) => {
+          const status = inferRoundStatus(round);
+          return (
+            <React.Fragment key={round.id}>
+              {index ? <span className="round-connector" aria-hidden="true" /> : null}
+              <button
+                aria-current={round.id === activeInterviewId ? "step" : undefined}
+                className={`round-step ${round.id === activeInterviewId ? "selected" : ""}`}
+                disabled={!canSwitch}
+                onClick={() => onSelect(round.id)}
+                title={`${roundLabelFor(round)} · ${status}${round.outcome ? ` · ${round.outcome}` : ""}`}
+                type="button"
+              >
+                <span className={`round-step-dot ${interviewStatusTone(status, statusColors)}`} />
+                <span>{roundLabelFor(round)}</span>
+                <small>{round.outcome || status}</small>
+              </button>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      <button
+        className="round-add-action"
+        disabled={!canSwitch}
+        onClick={onAdd}
+        title="安排下一轮"
+        type="button"
+      >
+        <Plus size={15} />
+        下一轮
+      </button>
+    </nav>
   );
 }
 
@@ -2130,10 +2441,11 @@ function loadInterviewStore() {
   } catch {
     // Ignore broken local data and start fresh.
   }
-  const interview = createInterview("未命名面试");
   return {
-    activeInterviewId: interview.id,
-    interviews: [interview],
+    activeInterviewId: "",
+    activeApplicationId: "",
+    applications: [],
+    interviews: [],
     jdLibrary: [],
     statusColors: {},
     statusOptions: [...DEFAULT_INTERVIEW_STATUSES],

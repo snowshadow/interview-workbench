@@ -1,35 +1,65 @@
 import { requestJson } from "../api.js";
 import {
+  inferRoundStatus,
   inferInterviewStatus,
   normalizeStatusColor,
   normalizeStatusLabel,
+  roundLabelFor,
 } from "../interview-domain.js";
 
 export const STORE_KEY = "interview-workbench.sessions.v1";
 export const DEFAULT_INTERVIEW_STATUSES = [
+  "招聘中",
+  "通过",
+  "未通过",
+  "放弃/归档",
   "未面",
   "已安排",
   "面试中",
   "已面待定",
   "一面通过",
-  "未通过",
-  "放弃/归档",
 ];
+export const DEFAULT_ROUND_STATUSES = ["待安排", "已安排", "进行中", "已结束", "已取消"];
 
 export function safeId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 }
 
-export function createInterview(name = "未命名面试") {
+export function createApplication(name = "未命名候选人") {
   const now = new Date().toISOString();
   return {
     id: safeId(),
     name,
     createdAt: now,
     updatedAt: now,
+    applicationStatus: "招聘中",
+    resumeMarkdown: "",
+    roleMarkdown: "",
+    resumeFile: null,
+    resumeNotes: [],
+    selectedJdId: "",
+    jdDraftName: "",
+  };
+}
+
+export function createInterview(name = "未命名面试", options = {}) {
+  const now = new Date().toISOString();
+  const roundOrder = Math.max(1, Number(options.roundOrder) || 1);
+  return {
+    id: safeId(),
+    applicationId: options.applicationId || safeId(),
+    name,
+    createdAt: now,
+    updatedAt: now,
     sessionStartedAt: null,
     scheduledAt: "",
-    interviewStatus: "未面",
+    applicationStatus: "招聘中",
+    interviewStatus: "招聘中",
+    roundOrder,
+    roundLabel: roundLabelFor({ roundOrder }),
+    roundStatus: "待安排",
+    outcome: "",
+    roundFocus: "",
     resumeMarkdown: "",
     roleMarkdown: "",
     resumeFile: null,
@@ -63,33 +93,68 @@ export async function loadRemoteInterviewStore() {
 
 export function interviewMetadataPatch(interview) {
   return {
-    name: interview.name,
     sessionStartedAt: interview.sessionStartedAt,
     scheduledAt: interview.scheduledAt,
-    interviewStatus: interview.interviewStatus,
-    resumeMarkdown: interview.resumeMarkdown,
-    roleMarkdown: interview.roleMarkdown,
-    resumeNotes: interview.resumeNotes,
-    selectedJdId: interview.selectedJdId,
-    jdDraftName: interview.jdDraftName,
+    roundOrder: interview.roundOrder,
+    roundLabel: interview.roundLabel,
+    roundStatus: interview.roundStatus,
+    outcome: interview.outcome,
+    roundFocus: interview.roundFocus,
     speakerLabels: interview.speakerLabels,
     askedQuestions: interview.askedQuestions,
   };
 }
 
+export function applicationMetadataPatch(application) {
+  return {
+    name: application.name,
+    applicationStatus: application.applicationStatus,
+    resumeMarkdown: application.resumeMarkdown,
+    roleMarkdown: application.roleMarkdown,
+    resumeNotes: application.resumeNotes,
+    selectedJdId: application.selectedJdId,
+    jdDraftName: application.jdDraftName,
+  };
+}
+
 export function normalizeStore(store) {
-  const interviews = Array.isArray(store?.interviews)
-    ? store.interviews.map(normalizeInterview)
-    : [];
-  const fallback = createInterview("未命名面试");
-  const nextInterviews = interviews.length ? interviews : [fallback];
+  const rawInterviews = Array.isArray(store?.interviews) ? store.interviews : [];
+  const applicationMap = new Map(
+    (Array.isArray(store?.applications) ? store.applications : []).map((application) => {
+      const normalized = normalizeApplication(application);
+      return [normalized.id, normalized];
+    }),
+  );
+
+  for (const interview of rawInterviews) {
+    const applicationId = interview?.applicationId || interview?.id || safeId();
+    if (!applicationMap.has(applicationId)) {
+      applicationMap.set(applicationId, normalizeApplication({ ...interview, id: applicationId }));
+    }
+  }
+
+  let applications = Array.from(applicationMap.values());
+  let interviews = rawInterviews.map((interview) => {
+    const applicationId = interview?.applicationId || interview?.id;
+    return normalizeInterview(
+      { ...interview, applicationId },
+      applicationMap.get(applicationId),
+    );
+  });
+
+  const nextInterviews = interviews;
   const activeInterviewId =
     store?.activeInterviewId &&
     nextInterviews.some((interview) => interview.id === store.activeInterviewId)
       ? store.activeInterviewId
-      : nextInterviews[0].id;
+      : nextInterviews[0]?.id || "";
   return {
     activeInterviewId,
+    activeApplicationId:
+      nextInterviews.find((interview) => interview.id === activeInterviewId)?.applicationId ||
+      applications[0]?.id ||
+      "",
+    applications,
     interviews: nextInterviews,
     jdLibrary: Array.isArray(store?.jdLibrary)
       ? store.jdLibrary.map(normalizeSavedJd)
@@ -116,21 +181,84 @@ export function withLocalTranscripts(nextStore, currentStore) {
   return {
     ...nextStore,
     interviews: nextStore.interviews.map((interview) => {
-      if (interview.lines.length) return interview;
       const local = localById.get(interview.id);
-      return local?.lines?.length ? { ...interview, lines: local.lines } : interview;
+      if (!local?.lines?.length) return interview;
+      return {
+        ...interview,
+        lines: mergePersistedAndLocalLines(interview.lines, local.lines),
+      };
     }),
   };
 }
 
-export function normalizeInterview(interview) {
-  const fallback = createInterview(interview?.name || "未命名面试");
-  const merged = { ...fallback, ...interview };
+function mergePersistedAndLocalLines(persistedLines, localLines) {
+  const merged = Array.isArray(persistedLines) ? [...persistedLines] : [];
+  const seen = new Set(merged.map(transcriptLineKey));
+  for (const line of localLines) {
+    const key = transcriptLineKey(line);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(line);
+  }
+  return merged;
+}
+
+function transcriptLineKey(line) {
+  return line?.id || [
+    line?.runId || "",
+    line?.speaker || "",
+    line?.startTime ?? "",
+    line?.endTime ?? "",
+    line?.text || "",
+  ].join(":");
+}
+
+export function normalizeApplication(application) {
+  const fallback = createApplication(application?.name || "未命名候选人");
+  const merged = { ...fallback, ...application };
+  const applicationStatus =
+    normalizeStatusLabel(application?.applicationStatus || application?.interviewStatus) ||
+    "招聘中";
   return {
     ...merged,
+    applicationStatus,
+    resumeFile:
+      application?.resumeFile && typeof application.resumeFile === "object"
+        ? application.resumeFile
+        : null,
+    resumeNotes: Array.isArray(application?.resumeNotes) ? application.resumeNotes : [],
+  };
+}
+
+export function normalizeInterview(interview, application = null) {
+  const fallback = createInterview(interview?.name || "未命名面试");
+  const merged = { ...fallback, ...interview };
+  const shared = application || normalizeApplication({
+    ...interview,
+    id: interview?.applicationId || interview?.id || fallback.applicationId,
+  });
+  const roundOrder = Math.max(1, Number(interview?.roundOrder) || 1);
+  const applicationStatus =
+    normalizeStatusLabel(shared.applicationStatus || interview?.applicationStatus || interview?.interviewStatus) ||
+    inferInterviewStatus(merged);
+  return {
+    ...merged,
+    applicationId: shared.id,
+    name: shared.name,
+    applicationStatus,
+    interviewStatus: applicationStatus,
+    resumeMarkdown: shared.resumeMarkdown || "",
+    roleMarkdown: shared.roleMarkdown || "",
+    resumeFile: shared.resumeFile,
+    resumeNotes: shared.resumeNotes,
+    selectedJdId: shared.selectedJdId || "",
+    jdDraftName: shared.jdDraftName || "",
+    roundOrder,
+    roundLabel: normalizeStatusLabel(interview?.roundLabel) || roundLabelFor({ roundOrder }),
+    roundStatus: inferRoundStatus({ ...merged, roundStatus: interview?.roundStatus }),
+    outcome: normalizeStatusLabel(interview?.outcome),
+    roundFocus: typeof interview?.roundFocus === "string" ? interview.roundFocus : "",
     scheduledAt: normalizeDateValue(interview?.scheduledAt),
-    interviewStatus:
-      normalizeStatusLabel(interview?.interviewStatus) || inferInterviewStatus(merged),
     lines: Array.isArray(interview?.lines) ? interview.lines : [],
     transcriptLineCount: Number.isFinite(Number(interview?.transcriptLineCount))
       ? Number(interview.transcriptLineCount)
@@ -140,13 +268,6 @@ export function normalizeInterview(interview) {
     cards: Array.isArray(interview?.cards) ? interview.cards : [],
     askedQuestions: Array.isArray(interview?.askedQuestions)
       ? interview.askedQuestions
-      : [],
-    resumeFile:
-      interview?.resumeFile && typeof interview.resumeFile === "object"
-        ? interview.resumeFile
-        : null,
-    resumeNotes: Array.isArray(interview?.resumeNotes)
-      ? interview.resumeNotes
       : [],
     speakerLabels:
       interview?.speakerLabels && typeof interview.speakerLabels === "object"
@@ -160,7 +281,9 @@ export function mergeStatusOptions(...sources) {
   const seen = new Set();
   const add = (value) => {
     const status = normalizeStatusLabel(
-      typeof value === "string" ? value : value?.interviewStatus,
+      typeof value === "string"
+        ? value
+        : value?.applicationStatus || value?.interviewStatus,
     );
     if (!status || seen.has(status)) return;
     seen.add(status);

@@ -1,3 +1,5 @@
+import { inferRoundStatus, roundLabelFor } from "../interview-domain.js";
+
 const DEFAULT_INTERVIEW_DURATION_MS = 60 * 60 * 1000;
 
 export function scheduledInterviewDate(interview) {
@@ -71,7 +73,8 @@ export function buildInterviewIcs(interview, now = new Date()) {
   const end = new Date(start.getTime() + DEFAULT_INTERVIEW_DURATION_MS);
   const candidate = String(interview.name || "未命名候选人").trim();
   const role = String(interview.jdDraftName || "未设置岗位").trim();
-  const status = String(interview.interviewStatus || "未面").trim();
+  const roundLabel = roundLabelFor(interview);
+  const status = inferRoundStatus(interview);
   const uidPart = String(interview.id || `${start.getTime()}-${candidate}`)
     .replace(/[^A-Za-z0-9._-]/g, "-")
     .slice(0, 120);
@@ -86,8 +89,8 @@ export function buildInterviewIcs(interview, now = new Date()) {
     `DTSTAMP:${formatIcsUtc(now)}`,
     `DTSTART:${formatIcsUtc(start)}`,
     `DTEND:${formatIcsUtc(end)}`,
-    `SUMMARY:${escapeIcsText(`面试 · ${candidate}`)}`,
-    `DESCRIPTION:${escapeIcsText(`岗位：${role}\n状态：${status}\n来自灵伴面试工作台`)}`,
+    `SUMMARY:${escapeIcsText(`面试 · ${candidate} · ${roundLabel}`)}`,
+    `DESCRIPTION:${escapeIcsText(`岗位：${role}\n轮次：${roundLabel}\n轮次状态：${status}\n来自灵伴面试工作台`)}`,
     "STATUS:CONFIRMED",
     "CATEGORIES:面试",
     "END:VEVENT",
@@ -107,7 +110,11 @@ export function calendarExportFilename(interview) {
     .trim()
     .replace(/[\\/:*?"<>|]/g, "-")
     .slice(0, 48);
-  return `${candidate || "interview"}-${day}${time ? `-${time}` : ""}.ics`;
+  const roundLabel = String(interview?.roundLabel || "round")
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .slice(0, 24);
+  return `${candidate || "interview"}-${roundLabel || "round"}-${day}${time ? `-${time}` : ""}.ics`;
 }
 
 function formatIcsUtc(value) {

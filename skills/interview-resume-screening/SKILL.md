@@ -1,6 +1,6 @@
 ---
 name: interview-resume-screening
-description: Screen a candidate resume against a job description and produce an evidence-based hiring recommendation. Use when the user asks for resume screening, JD matching, candidate fit, hiring risks, whether to interview, or wants the result saved to Interview Workbench.
+description: "Screen a resume against a JD and produce an evidence-based recommendation shared by the whole Interview Workbench Application. Use for resume screening, JD fit, hiring risks, whether to interview, or saving reusable screening evidence across all Rounds for the exact candidate-and-role process."
 ---
 
 # Resume Screening
@@ -9,7 +9,7 @@ Evaluate the candidate against the actual work in the JD. Do not summarize the r
 
 ## Workflow
 
-1. Read the JD and resume from their source files. If an Interview Workbench session is named, use `list_interviews` and `get_interview_context` first.
+1. Read the JD and resume from their source files. If an Interview Workbench record is named, use `list_applications` and `get_application_context` first. Match on both candidate and target role; never merge same-name Applications for different roles.
 2. Separate the JD into must-haves, differentiators, and points that need interview evidence.
 3. Identify what the resume proves about ownership, scope, technical or functional depth, outcomes, and recent hands-on work.
 4. Separate **direct evidence** from **adjacent evidence**. Titles, team size, product names, and fashionable terms are not proof by themselves.
@@ -33,4 +33,6 @@ Write in the user's language. Keep the report concise and decision-led:
 
 Use the organization's own decision labels when supplied. Do not invent a universal score or hiring threshold.
 
-When an interview session exists, save the final Markdown with `save_interview_artifact` using kind `resume-screening` and title `Resume screening`. Do not change interview status unless the user explicitly asks.
+Resume screening belongs to the Application, not an individual Round. When one exact candidate-and-role Application exists, save the final Markdown with `save_application_artifact`, kind `resume-screening`, and title `Resume screening`, then verify it through `get_application_context`.
+
+Do not create a Round merely to store screening. If no exact Application exists, return the result without attaching it to a guessed record. Do not change Application status unless the user explicitly asks.

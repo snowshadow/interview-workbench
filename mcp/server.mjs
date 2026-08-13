@@ -14,9 +14,31 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+server.registerTool("list_applications", {
+  title: "List applications",
+  description: "Find candidate application processes without loading resumes, round details, or transcripts.",
+  inputSchema: {
+    query: z.string().max(160).optional().describe("Candidate or role name search"),
+    applicationStatus: z.string().max(24).optional().describe("Exact application status"),
+    limit: z.number().int().min(1).max(200).default(50),
+  },
+  annotations: { readOnlyHint: true, openWorldHint: false },
+}, async (input) => toolResult(await request(`/api/applications?${queryString(input)}`)));
+
+server.registerTool("get_application_context", {
+  title: "Get application context",
+  description: "Load application-wide candidate, role, resume, round summaries, unresolved items, and saved artifacts. Full round transcripts are excluded; use get_transcript_chunk for a specific round only when needed.",
+  inputSchema: {
+    applicationId: z.string().min(1).max(160),
+  },
+  annotations: { readOnlyHint: true, openWorldHint: false },
+}, async ({ applicationId }) => toolResult(
+  await request(`/api/applications/${encodeURIComponent(applicationId)}/context`),
+));
+
 server.registerTool("list_interviews", {
   title: "List interviews",
-  description: "Find interview sessions without loading resumes or transcripts.",
+  description: "Find individual interview rounds without loading resumes or transcripts.",
   inputSchema: {
     query: z.string().max(160).optional().describe("Candidate or role name search"),
     status: z.string().max(24).optional().describe("Exact interview status"),
@@ -27,7 +49,7 @@ server.registerTool("list_interviews", {
 
 server.registerTool("get_interview_context", {
   title: "Get interview context",
-  description: "Load interview metadata, JD, resume analysis, notes, AI cards, saved artifacts, and linked sessions. Transcript lines are excluded; use get_transcript_chunk for them.",
+  description: "Load one interview round's metadata, preparation, notes, AI cards, saved artifacts, and linked sessions. Transcript lines are excluded; use get_transcript_chunk for them. Use get_application_context for cross-round context.",
   inputSchema: {
     interviewId: z.string().min(1).max(160),
   },
@@ -53,7 +75,7 @@ server.registerTool("get_transcript_chunk", {
 
 server.registerTool("create_interview", {
   title: "Create interview",
-  description: "Create an interview session, optionally attach a local PDF/DOC/DOCX resume, and link the current AI session.",
+  description: "Create a candidate application and its first interview round through the backwards-compatible interview endpoint, optionally attach a local PDF/DOC/DOCX resume, and link the current AI session to that round.",
   inputSchema: {
     name: z.string().min(1).max(160).describe("Candidate or interview name"),
     interviewStatus: z.string().max(24).default("未面"),
@@ -83,12 +105,67 @@ server.registerTool("create_interview", {
   const session = resolveSession(input);
   let linkedSession = null;
   if (session) linkedSession = await linkSession(created.interview.id, session);
-  return toolResult({ interview: created.interview, resumeFile, linkedSession });
+  return toolResult({
+    application: created.application || null,
+    interview: created.interview,
+    resumeFile,
+    linkedSession,
+  });
+});
+
+server.registerTool("create_interview_round", {
+  title: "Create interview round",
+  description: "Add a new interview round to an existing candidate application without duplicating its resume or job description.",
+  inputSchema: {
+    applicationId: z.string().min(1).max(160),
+    roundLabel: z.string().min(1).max(80).describe("Round name, for example 一面、二面 or 终面"),
+    scheduledAt: z.string().optional().describe("ISO 8601 date-time"),
+    roundFocus: z.string().max(10000).optional().describe("Goals and unresolved items for this round"),
+    roundStatus: z.string().max(24).optional().describe("Round lifecycle status; omitted to let the workbench infer it from scheduledAt"),
+  },
+  annotations: { destructiveHint: false, openWorldHint: false },
+}, async ({ applicationId, ...round }) => {
+  const created = await request(`/api/applications/${encodeURIComponent(applicationId)}/rounds`, {
+    method: "POST",
+    body: round,
+  });
+  return toolResult({
+    application: applicationToolSummary(created.application),
+    interview: interviewRoundToolSummary(created.interview),
+  });
+});
+
+server.registerTool("save_application_artifact", {
+  title: "Save application artifact",
+  description: "Save or replace an application-wide Markdown artifact, such as a cross-round handoff, unresolved-item summary, or final decision.",
+  inputSchema: {
+    applicationId: z.string().min(1).max(160),
+    kind: z.string().regex(/^[a-z0-9._-]+$/).max(80),
+    title: z.string().max(200).optional(),
+    markdown: z.string().min(1).max(1000000),
+    harness: z.string().max(40).optional(),
+    sessionId: z.string().max(200).optional(),
+  },
+  annotations: { destructiveHint: false, openWorldHint: false },
+}, async (input) => {
+  const session = resolveSession(input);
+  return toolResult(await request(
+    `/api/applications/${encodeURIComponent(input.applicationId)}/artifacts/${encodeURIComponent(input.kind)}`,
+    {
+      method: "PUT",
+      body: {
+        title: input.title,
+        markdown: input.markdown,
+        sourceHarness: session?.harness || "",
+        sourceSessionId: session?.sessionId || "",
+      },
+    },
+  ));
 });
 
 server.registerTool("save_interview_artifact", {
   title: "Save interview artifact",
-  description: "Save or replace a Markdown artifact for an interview, such as resume screening, interview preparation, or interview summary.",
+  description: "Save or replace a round-specific Markdown artifact, such as interview preparation, round handoff, or interview summary. Use save_application_artifact for resume screening and process-wide conclusions.",
   inputSchema: {
     interviewId: z.string().min(1).max(160),
     kind: z.string().regex(/^[a-z0-9._-]+$/).max(80),
@@ -132,9 +209,24 @@ server.registerTool("link_harness_session", {
   await linkSession(interviewId, session),
 ));
 
+server.registerTool("update_application_status", {
+  title: "Update application status",
+  description: "Update the hiring status of a candidate application only after the user has explicitly chosen or approved it.",
+  inputSchema: {
+    applicationId: z.string().min(1).max(160),
+    applicationStatus: z.string().min(1).max(24),
+  },
+  annotations: { destructiveHint: false, openWorldHint: false },
+}, async ({ applicationId, applicationStatus }) => toolResult(
+  await request(`/api/applications/${encodeURIComponent(applicationId)}`, {
+    method: "PATCH",
+    body: { applicationStatus },
+  }),
+));
+
 server.registerTool("update_interview_status", {
-  title: "Update interview status",
-  description: "Update an interview status only after the user has explicitly chosen or approved it.",
+  title: "Update application status by interview",
+  description: "Backwards-compatible tool: update the parent application's hiring status through an interview-round ID and the legacy interviewStatus field. It does not manage the round lifecycle.",
   inputSchema: {
     interviewId: z.string().min(1).max(160),
     interviewStatus: z.string().min(1).max(24),
@@ -226,6 +318,34 @@ function queryString(input) {
     if (value !== undefined && value !== "") params.set(key, String(value));
   }
   return params.toString();
+}
+
+function applicationToolSummary(application) {
+  if (!application) return null;
+  return {
+    id: application.id,
+    name: application.name,
+    applicationStatus: application.applicationStatus,
+    jdDraftName: application.jdDraftName,
+    roundCount: application.roundCount ?? application.rounds?.length ?? 0,
+    updatedAt: application.updatedAt,
+  };
+}
+
+function interviewRoundToolSummary(interview) {
+  if (!interview) return null;
+  return {
+    id: interview.id,
+    applicationId: interview.applicationId,
+    roundOrder: interview.roundOrder,
+    roundLabel: interview.roundLabel,
+    roundStatus: interview.roundStatus,
+    outcome: interview.outcome,
+    roundFocus: interview.roundFocus,
+    scheduledAt: interview.scheduledAt,
+    createdAt: interview.createdAt,
+    updatedAt: interview.updatedAt,
+  };
 }
 
 function toolResult(value) {
