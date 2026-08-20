@@ -1,6 +1,30 @@
-# 面试工作台
+<p align="center">
+  <img src="docs/assets/github-social-preview.png" alt="面试工作台：本地优先的实时面试辅助工具" width="100%">
+</p>
 
-一个本地优先的实时面试辅助工具。它把浏览器采集的麦克风和会议声音发送给流式语音识别服务，在本机按应聘流程保存共享资料和多轮面试记录；面试官可以随时提交当前轮次的最新转录，让大模型生成简短的**犀利追问**和**查漏提醒**。
+<h1 align="center">面试工作台</h1>
+
+<p align="center">
+  本地优先的实时面试辅助工具：实时转录，生成犀利追问，并按应聘流程保存多轮面试资料。
+</p>
+
+<p align="center">
+  <a href="https://github.com/snowshadow/interview-workbench/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/snowshadow/interview-workbench/ci.yml?branch=main&amp;style=flat-square&amp;label=CI" alt="CI"></a>
+  <a href="https://github.com/snowshadow/interview-workbench/blob/main/LICENSE"><img src="https://img.shields.io/github/license/snowshadow/interview-workbench?style=flat-square" alt="Apache 2.0 License"></a>
+  <img src="https://img.shields.io/badge/Node.js-%E2%89%A522.13-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white" alt="Node.js 22.13 or newer">
+  <img src="https://img.shields.io/badge/Local--first-0071E3?style=flat-square" alt="Local-first">
+  <img src="https://img.shields.io/badge/MCP-enabled-6B5DD3?style=flat-square" alt="MCP enabled">
+  <a href="https://x.com/Alfredxia"><img src="https://img.shields.io/badge/X-@Alfredxia-000000?style=flat-square&amp;logo=x&amp;logoColor=white" alt="X @Alfredxia"></a>
+</p>
+
+<p align="center">
+  <a href="#功能">功能</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#ai-编程助手联动">AI 编程助手</a> ·
+  <a href="#安全与隐私">安全与隐私</a>
+</p>
+
+面试工作台把浏览器采集的麦克风和会议声音发送给流式语音识别服务，在本机按应聘流程保存共享资料和多轮面试记录。面试官可以随时提交当前轮次的最新转录，让大模型生成简短的**犀利追问**和**查漏提醒**。
 
 ![面试工作台界面](docs/assets/interview-workbench-macos.webp)
 
