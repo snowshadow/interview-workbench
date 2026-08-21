@@ -5,6 +5,11 @@ const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
 
 export function createLogger(config) {
   fs.mkdirSync(config.logDir, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(config.logDir, 0o700);
+  } catch {
+    // Some platforms do not implement POSIX permissions.
+  }
   const threshold = LEVELS[config.logLevel] ?? LEVELS.info;
 
   function write(level, event, fields = {}) {

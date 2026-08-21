@@ -9,6 +9,7 @@ import {
   startOfLocalWeek,
 } from "../src/lib/calendar.js";
 import {
+  canOpenSystemCalendar,
   isLoopbackRequest,
   openInterviewInSystemCalendar,
 } from "../server/services/calendar-export.js";
@@ -84,4 +85,15 @@ test("system calendar launch is limited to loopback requests", () => {
   assert.equal(isLoopbackRequest({ socket: { remoteAddress: "::1" } }), true);
   assert.equal(isLoopbackRequest({ socket: { remoteAddress: "::ffff:127.0.0.1" } }), true);
   assert.equal(isLoopbackRequest({ socket: { remoteAddress: "192.168.1.20" } }), false);
+});
+
+test("system calendar open is disabled when an access token is configured", () => {
+  const loopback = { socket: { remoteAddress: "127.0.0.1" } };
+  assert.equal(canOpenSystemCalendar(loopback), true);
+  assert.equal(canOpenSystemCalendar(loopback, { accessToken: "" }), true);
+  assert.equal(canOpenSystemCalendar(loopback, { accessToken: "test-access-token" }), false);
+  assert.equal(
+    canOpenSystemCalendar({ socket: { remoteAddress: "192.168.1.20" } }, { accessToken: "" }),
+    false,
+  );
 });

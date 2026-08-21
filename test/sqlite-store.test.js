@@ -48,6 +48,57 @@ test("legacy JSON migrates without losing interviews and extracts attachments", 
   }
 });
 
+test("replace import rejects invalid payloads without deleting existing rows", () => {
+  const config = createTestConfig("interview-replace-guard-");
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    store.createInterview(sampleInterview());
+    assert.equal(store.getStore().interviews.length, 1);
+    for (const payload of [{}, null, [], { interviews: "nope" }]) {
+      assert.throws(() => store.importStore(payload, { replace: true }), {
+        code: "INVALID_STORE_FORMAT",
+        message: /保存数据格式无效/,
+      });
+    }
+    assert.throws(() => store.importBackup({}), /备份文件格式无效/);
+    assert.equal(store.getStore().interviews.length, 1);
+    store.importStore({ interviews: [] }, { replace: true });
+    assert.equal(store.getStore().interviews.length, 0);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("invalid legacy JSON does not wipe an existing sqlite store", () => {
+  const config = createTestConfig("interview-legacy-guard-");
+  const first = new SqliteStore(config, silentLogger);
+  first.createInterview(sampleInterview());
+  first.close();
+  fs.writeFileSync(config.legacyStoreFile, JSON.stringify({ not: "a store" }));
+  const second = new SqliteStore(config, silentLogger);
+  try {
+    assert.equal(second.getStore().interviews.length, 1);
+  } finally {
+    second.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("existing data directories are tightened to 0700", () => {
+  const config = createTestConfig("interview-dir-mode-");
+  fs.chmodSync(config.dataDir, 0o755);
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    assert.equal(fs.statSync(config.dataDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(config.attachmentDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(config.backupDir).mode & 0o777, 0o700);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
 test("full export and import preserve attachment bytes", () => {
   const sourceConfig = createTestConfig("interview-source-");
   const targetConfig = createTestConfig("interview-target-");

@@ -6,6 +6,16 @@
 
 默认支持单用户服务，并仅监听 `127.0.0.1`。监听非本机地址时必须配置访问令牌，并通过可信的 HTTPS 反向代理提供访问。不要把开发服务直接暴露到公网。
 
+远程部署时：
+
+- `WORKBENCH_ACCESS_TOKEN` 去掉空白后至少 16 个字符
+- `/api` 按客户端地址限流；鉴权失败会额外节流
+- 默认不信任 `X-Forwarded-For`。只有反向代理会覆盖该头时，才设置 `WORKBENCH_TRUST_PROXY=1`
+- 已配置访问令牌时，`calendar-import` 不会在本机调用 `open`，只应下载 `.ics` 后手动导入
+- ASR / LLM 地址始终拒绝云元数据和链路本地地址。默认仍允许本机回环和 RFC1918，以便使用 Ollama 等本地模型。远程环境可设置 `WORKBENCH_BLOCK_PRIVATE_PROVIDERS=1`，或用 `WORKBENCH_OUTBOUND_ALLOWLIST` 限制主机名
+- JSON 请求体在鉴权之后解析。错误响应为 JSON，不返回堆栈或本机路径。响应头不含 `X-Powered-By`
+- CSP 含 `style-src 'self' 'unsafe-inline'`，不要放开 `script-src`
+
 ## 漏洞反馈
 
 公开问题中不得包含凭证、简历、转录或日志。疑似安全漏洞应通过私密方式报告给仓库维护者。

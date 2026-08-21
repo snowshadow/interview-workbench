@@ -56,3 +56,19 @@ test("malformed ASR frames are rejected before reading past the buffer", () => {
   const invalid = Buffer.from([0x11, 0x90, 0x11, 0x00, 0xff, 0xff, 0xff, 0xff]);
   assert.throws(() => parseServerMessage(invalid), /payload size/);
 });
+
+test("gzip ASR payloads are capped at 1MB after decompression", () => {
+  const json = Buffer.from(JSON.stringify({ result: { text: "ok", utterances: [] } }));
+  const parsed = parseServerMessage(asrResponseFrame(zlib.gzipSync(json), 0x1));
+  assert.equal(parsed.payload.result.text, "ok");
+
+  const bomb = zlib.gzipSync(Buffer.alloc(1_048_577, 0x61));
+  assert.throws(() => parseServerMessage(asrResponseFrame(bomb, 0x1)), /1MB/);
+});
+
+function asrResponseFrame(payload, compression = 0) {
+  const header = Buffer.from([0x11, 0x90, (0x1 << 4) | compression, 0x00]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32BE(payload.length);
+  return Buffer.concat([header, size, payload]);
+}

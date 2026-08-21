@@ -27,6 +27,7 @@ test("logs redact sensitive fields and cap rotated files", () => {
     assert.equal(content.includes("敏感转录"), false);
     assert.equal(content.includes("secret-token-12345678"), false);
     assert.ok(content.includes("[redacted"));
+    assert.equal(fs.statSync(config.logDir).mode & 0o777, 0o700);
     for (const name of files) {
       assert.equal(fs.statSync(path.join(config.logDir, name)).mode & 0o777, 0o600);
     }

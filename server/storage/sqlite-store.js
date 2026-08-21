@@ -31,6 +31,9 @@ export class SqliteStore {
     fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(config.attachmentDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(config.backupDir, { recursive: true, mode: 0o700 });
+    trySetPrivateMode(config.dataDir, 0o700);
+    trySetPrivateMode(config.attachmentDir, 0o700);
+    trySetPrivateMode(config.backupDir, 0o700);
     const databaseExisted = fs.existsSync(config.databaseFile) && fs.statSync(config.databaseFile).size > 0;
     this.db = new DatabaseSync(config.databaseFile);
     this.transactionDepth = 0;
@@ -340,7 +343,14 @@ export class SqliteStore {
     trySetPrivateMode(backup);
 
     this.transaction(() => {
-      this.importStore(legacy, { replace: true });
+      try {
+        this.importStore(legacy, { replace: true });
+      } catch (error) {
+        if (error.code !== "INVALID_STORE_FORMAT") throw error;
+        this.logger.warn("store.legacy_import_skipped", {
+          error: { message: error.message },
+        });
+      }
       this.setMeta("legacy_json_migrated", new Date().toISOString());
       this.setMeta("legacy_json_backup", path.relative(this.config.dataDir, backup));
     });
@@ -395,6 +405,7 @@ export class SqliteStore {
   }
 
   importStore(store, { replace = false } = {}) {
+    if (replace) assertImportableStore(store);
     const interviews = Array.isArray(store?.interviews) ? store.interviews : [];
     const applications = Array.isArray(store?.applications) ? store.applications : [];
     if (replace) {
@@ -1424,9 +1435,7 @@ export class SqliteStore {
   }
 
   importBackup(store) {
-    if (!isObject(store) || !Array.isArray(store.interviews)) {
-      throw new Error("备份文件格式无效");
-    }
+    assertImportableStore(store, "备份文件格式无效");
     this.backup();
     return this.transaction(() => this.importStore(store, { replace: true }));
   }
@@ -2099,6 +2108,12 @@ function isObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function assertImportableStore(store, message = "保存数据格式无效") {
+  if (!isObject(store) || !Array.isArray(store.interviews)) {
+    throw Object.assign(new Error(message), { code: "INVALID_STORE_FORMAT" });
+  }
+}
+
 function safeUnlink(file) {
   try {
     fs.unlinkSync(file);
@@ -2107,9 +2122,9 @@ function safeUnlink(file) {
   }
 }
 
-function trySetPrivateMode(file) {
+function trySetPrivateMode(file, mode = 0o600) {
   try {
-    fs.chmodSync(file, 0o600);
+    fs.chmodSync(file, mode);
   } catch {
     // Some platforms do not implement POSIX permissions.
   }

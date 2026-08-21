@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertOutboundUrl, loadOutboundPolicy } from "./outbound-url.js";
 
 const serverDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(serverDir, "..");
@@ -24,12 +25,29 @@ export function loadConfig(env = process.env) {
       "WORKBENCH_ACCESS_TOKEN is required when HOST is not a loopback address",
     );
   }
+  if (!isLoopbackHost(host) && accessToken.length < 16) {
+    throw new Error(
+      "WORKBENCH_ACCESS_TOKEN must be at least 16 characters when HOST is not a loopback address",
+    );
+  }
+
+  const llmBaseUrl = String(
+    env.DEEPSEEK_BASE_URL || env.LLM_BASE_URL || "https://api.deepseek.com",
+  ).replace(/\/$/, "");
+  const asrUrl = String(
+    env.VOLCENGINE_ASR_URL ||
+      "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+  );
+  const outbound = loadOutboundPolicy(env);
+  assertOutboundUrl(llmBaseUrl, outbound, { protocols: ["http:", "https:"], label: "大模型 API 地址" });
+  assertOutboundUrl(asrUrl, outbound, { protocols: ["ws:", "wss:"], label: "ASR 地址" });
 
   return {
     projectDir,
     port,
     host,
     accessToken,
+    trustProxy: isTruthy(env.WORKBENCH_TRUST_PROXY),
     allowedOrigins: new Set(allowedOrigins),
     dataDir,
     attachmentDir: path.join(dataDir, "attachments"),
@@ -43,9 +61,7 @@ export function loadConfig(env = process.env) {
     llm: {
       provider: String(env.LLM_PROVIDER || "openai-compatible"),
       apiKey: String(env.DEEPSEEK_API_KEY || env.LLM_API_KEY || ""),
-      baseUrl: String(
-        env.DEEPSEEK_BASE_URL || env.LLM_BASE_URL || "https://api.deepseek.com",
-      ).replace(/\/$/, ""),
+      baseUrl: llmBaseUrl,
       model: String(env.DEEPSEEK_MODEL || env.LLM_MODEL || "deepseek-chat"),
       timeoutMs: readInteger(env.DEEPSEEK_TIMEOUT_MS, 75000, 1000, 300000),
     },
@@ -57,10 +73,7 @@ export function loadConfig(env = process.env) {
       resourceId: String(
         env.VOLCENGINE_ASR_RESOURCE_ID || "volc.seedasr.sauc.duration",
       ),
-      url: String(
-        env.VOLCENGINE_ASR_URL ||
-          "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
-      ),
+      url: asrUrl,
     },
   };
 }
@@ -74,6 +87,10 @@ function parseList(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function isTruthy(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
 function readInteger(value, fallback, min, max = Number.MAX_SAFE_INTEGER) {

@@ -76,9 +76,13 @@ ASR 和 LLM 都通过工厂创建（`createAsrProvider` / `createLlmProvider`）
 ## 安全边界
 
 - 默认监听 `127.0.0.1`
-- 非 loopback 地址必须设置 `WORKBENCH_ACCESS_TOKEN`
+- 非 loopback 地址必须设置 `WORKBENCH_ACCESS_TOKEN`，且令牌长度至少 16
 - HTTP 使用 Bearer token；浏览器 WebSocket 使用认证子协议
 - Origin 白名单同时保护 REST 和 WebSocket
+- JSON 请求体在鉴权之后解析；错误页不返回堆栈
+- `/api` 有 IP 级限流；鉴权失败单独计数
+- ASR / LLM 出站地址拒绝云元数据和链路本地地址，连接时检查解析后的 IP
+- MCP 读取简历时限制在 `Downloads` / `Documents` / `Desktop` 及 `WORKBENCH_RESUME_ROOTS`
 - 静态页面和 API 设置 CSP、Permissions Policy、禁止嵌入和 MIME sniffing
 - 日志按大小轮转并脱敏，不记录转录、简历、候选人姓名或 API Key
 - 删除场次后，对应附件不能继续通过公开 URL 读取
@@ -96,6 +100,7 @@ ASR 和 LLM 都通过工厂创建（`createAsrProvider` / `createLlmProvider`）
 ```text
 server/config.js                 环境配置与部署约束
 server/security.js               HTTP/WebSocket 安全边界
+server/outbound-url.js           ASR/LLM 出站地址与解析 IP 检查
 server/storage/                  SQLite repository 和迁移
 server/services/                 持久化业务任务
 server/services/resume-preview.js DOC/DOCX 本地文本预览

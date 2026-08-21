@@ -15,7 +15,7 @@ import { AnalysisJobService } from "./services/analysis-job-service.js";
 import { createInterviewAnalyzer } from "./services/interview-analysis.js";
 import { extractWordPreviewText, isWordAttachment } from "./services/resume-preview.js";
 import {
-  isLoopbackRequest,
+  canOpenSystemCalendar,
   openInterviewInSystemCalendar,
 } from "./services/calendar-export.js";
 import {
@@ -49,9 +49,12 @@ appendServerLog("process.started", {
 });
 
 const app = express();
+app.disable("x-powered-by");
+if (config.trustProxy) app.set("trust proxy", 1);
 app.use(security.responseHeaders);
-app.use(express.json({ limit: "16mb" }));
+app.use("/api", security.rateLimitMiddleware);
 app.use("/api", security.httpMiddleware);
+app.use("/api", express.json({ limit: "16mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json(currentHealth());
@@ -121,7 +124,8 @@ app.put("/api/store", (req, res) => {
     res.json({ ok: true, store: nextStore, updatedAt: new Date().toISOString() });
   } catch (error) {
     appendServerLog("store.write_failed", { error: serializeError(error) });
-    res.status(500).json({ error: error.message || "保存场次数据失败" });
+    const status = error.code === "INVALID_STORE_FORMAT" ? 400 : 500;
+    res.status(status).json({ error: error.message || "保存场次数据失败" });
   }
 });
 
@@ -272,7 +276,7 @@ app.post("/api/interviews/:interviewId/calendar-import", async (req, res) => {
   const interview = storeRepository.getInterview(req.params.interviewId);
   if (!interview) return res.status(404).json({ error: "面试场次不存在" });
   if (!interview.scheduledAt) return res.status(400).json({ error: "这场面试还没有安排时间" });
-  if (!isLoopbackRequest(req)) {
+  if (!canOpenSystemCalendar(req, { accessToken: config.accessToken })) {
     return res.status(409).json({ error: "远程访问时请下载日历文件后手动导入" });
   }
 
@@ -578,8 +582,10 @@ app.get("*", (req, res, next) => {
   });
 });
 
+app.use(security.apiErrorHandler);
+
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
 
 server.on("upgrade", (request, socket, head) => {
   if (!request.url?.startsWith("/ws/asr") || !security.validateUpgrade(request)) {
