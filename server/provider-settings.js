@@ -1,3 +1,5 @@
+import { assertOutboundUrl, loadOutboundPolicy } from "./outbound-url.js";
+
 export function buildEffectiveProviderConfig(baseConfig, storedSettings = {}) {
   const storedAsr = storedSettings.asr || {};
   const storedLlm = storedSettings.llm || {};
@@ -13,7 +15,7 @@ export function buildEffectiveProviderConfig(baseConfig, storedSettings = {}) {
   };
 }
 
-export function normalizeProviderSettingsPatch(current = {}, patch = {}) {
+export function normalizeProviderSettingsPatch(current = {}, patch = {}, policy = loadOutboundPolicy()) {
   const currentAsr = current.asr || {};
   const currentLlm = current.llm || {};
   const patchAsr = patch.asr || {};
@@ -32,7 +34,7 @@ export function normalizeProviderSettingsPatch(current = {}, patch = {}) {
         "ASR 资源 ID",
         300,
       ),
-      url: normalizeUrl(patchAsr.url ?? currentAsr.url, ["ws:", "wss:"], "ASR 地址"),
+      url: normalizeUrl(patchAsr.url ?? currentAsr.url, ["ws:", "wss:"], "ASR 地址", policy),
     },
     llm: {
       apiKey: nextSecret(currentLlm.apiKey, patchLlm.apiKey, patchLlm.clearApiKey),
@@ -40,6 +42,7 @@ export function normalizeProviderSettingsPatch(current = {}, patch = {}) {
         patchLlm.baseUrl ?? currentLlm.baseUrl,
         ["http:", "https:"],
         "大模型 API 地址",
+        policy,
       ).replace(/\/$/, ""),
       model: requiredText(patchLlm.model ?? currentLlm.model, "模型名称", 300),
       timeoutMs: normalizeTimeout(patchLlm.timeoutMs ?? currentLlm.timeoutMs),
@@ -93,16 +96,9 @@ function requiredText(value, label, maxLength) {
   return text;
 }
 
-function normalizeUrl(value, protocols, label) {
+function normalizeUrl(value, protocols, label, policy) {
   const text = requiredText(value, label, 2000);
-  let url;
-  try {
-    url = new URL(text);
-  } catch {
-    throw new Error(`${label}格式无效`);
-  }
-  if (!protocols.includes(url.protocol)) throw new Error(`${label}协议无效`);
-  return url.toString();
+  return assertOutboundUrl(text, policy, { protocols, label }).toString();
 }
 
 function normalizeTimeout(value) {

@@ -95,7 +95,30 @@ test("provider settings reject invalid endpoints", () => {
     () => normalizeProviderSettingsPatch({}, {
       asr: { resourceId: "resource", url: "https://not-websocket.example.test" },
       llm: { baseUrl: "https://api.example.test", model: "model", timeoutMs: 75000 },
-    }),
+    }, { allowlist: [] }),
     /ASR 地址协议无效/,
+  );
+});
+
+test("provider settings block cloud metadata and optionally private addresses", () => {
+  const asr = { resourceId: "resource", url: "wss://asr.example.test/ws" };
+  assert.throws(
+    () => normalizeProviderSettingsPatch({}, {
+      asr,
+      llm: { baseUrl: "http://169.254.169.254/", model: "model", timeoutMs: 75000 },
+    }, { allowlist: [] }),
+    /大模型 API 地址不可用/,
+  );
+  const local = normalizeProviderSettingsPatch({}, {
+    asr,
+    llm: { baseUrl: "http://127.0.0.1:11434/v1", model: "model", timeoutMs: 75000 },
+  }, { allowlist: [] });
+  assert.equal(local.llm.baseUrl, "http://127.0.0.1:11434/v1");
+  assert.throws(
+    () => normalizeProviderSettingsPatch({}, {
+      asr,
+      llm: { baseUrl: "http://127.0.0.1:11434/v1", model: "model", timeoutMs: 75000 },
+    }, { blockPrivate: true, allowlist: [] }),
+    /大模型 API 地址不可用/,
   );
 });

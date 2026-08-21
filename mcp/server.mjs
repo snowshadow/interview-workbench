@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
-import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
+import { readAllowedResumeFile } from "./resume-path.js";
 
 const baseUrl = String(process.env.WORKBENCH_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const accessToken = String(process.env.WORKBENCH_ACCESS_TOKEN || "").trim();
@@ -260,26 +259,15 @@ async function request(resource, options = {}) {
 }
 
 async function uploadResume(interviewId, resumePath) {
-  const absolutePath = path.resolve(resumePath);
-  const extension = path.extname(absolutePath).toLowerCase();
-  const types = {
-    ".pdf": "application/pdf",
-    ".doc": "application/msword",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  };
-  if (!types[extension]) throw new Error("Resume must be a PDF, DOC, or DOCX file");
-  const stat = fs.statSync(absolutePath);
-  if (!stat.isFile() || stat.size < 1 || stat.size > 10 * 1024 * 1024) {
-    throw new Error("Resume must be a file between 1 byte and 10MB");
-  }
-  const dataUrl = `data:${types[extension]};base64,${fs.readFileSync(absolutePath).toString("base64")}`;
+  const file = readAllowedResumeFile(resumePath);
+  const dataUrl = `data:${file.type};base64,${file.bytes.toString("base64")}`;
   return request(`/api/interviews/${encodeURIComponent(interviewId)}/resume`, {
     method: "PUT",
     body: {
       resumeFile: {
-        name: path.basename(absolutePath),
-        type: types[extension],
-        size: stat.size,
+        name: file.name,
+        type: file.type,
+        size: file.size,
         dataUrl,
       },
     },

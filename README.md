@@ -114,8 +114,12 @@ node scripts/install-skills.mjs codex
 | --- | --- |
 | `HOST` / `PORT` | 服务监听地址，默认 `127.0.0.1:8787` |
 | `WORKBENCH_DATA_DIR` | SQLite、附件、备份和日志目录 |
-| `WORKBENCH_ACCESS_TOKEN` | 非本机监听时必填 |
+| `WORKBENCH_ACCESS_TOKEN` | 非本机监听时必填，至少 16 个字符 |
 | `WORKBENCH_ALLOWED_ORIGINS` | 允许访问 API 和 WebSocket 的网页来源 |
+| `WORKBENCH_TRUST_PROXY` | 设为 `1` 时信任一层反向代理的客户端地址 |
+| `WORKBENCH_BLOCK_PRIVATE_PROVIDERS` | 设为 `1` 时禁止 ASR/LLM 使用回环和私网地址 |
+| `WORKBENCH_OUTBOUND_ALLOWLIST` | 逗号分隔的出站主机名白名单；为空则不额外限制 |
+| `WORKBENCH_RESUME_ROOTS` | MCP 读取简历时额外允许的目录，逗号或冒号分隔 |
 | `VOLCENGINE_ASR_*` | 可选，为网页配置提供火山引擎默认值 |
 | `LLM_*` 或 `DEEPSEEK_*` | 可选，为网页配置提供大模型默认值 |
 

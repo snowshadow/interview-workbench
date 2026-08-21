@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import { assertOutboundUrl, createSafeLookup, loadOutboundPolicy } from "../../outbound-url.js";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
@@ -47,8 +48,11 @@ export class OpenAiCompatibleLlmProvider {
 }
 
 function postJson(urlString, { headers, body, timeoutMs, signal }) {
-  const url = new URL(urlString);
-  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Unsupported LLM URL protocol");
+  const policy = loadOutboundPolicy();
+  const url = assertOutboundUrl(urlString, policy, {
+    protocols: ["http:", "https:"],
+    label: "大模型 API 地址",
+  });
   const bodyBuffer = Buffer.from(body, "utf8");
   const transport = url.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
@@ -62,6 +66,7 @@ function postJson(urlString, { headers, body, timeoutMs, signal }) {
         path: `${url.pathname}${url.search}`,
         headers: { ...headers, "Content-Length": bodyBuffer.length },
         ALPNProtocols: ["http/1.1"],
+        lookup: createSafeLookup(policy),
       },
       (response) => {
         const chunks = [];

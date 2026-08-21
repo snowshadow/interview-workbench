@@ -14,6 +14,11 @@ export function isLoopbackRequest(request) {
   return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(address);
 }
 
+export function canOpenSystemCalendar(request, { accessToken } = {}) {
+  if (String(accessToken || "").trim()) return false;
+  return isLoopbackRequest(request);
+}
+
 export async function openInterviewInSystemCalendar({
   interview,
   exportDir,

@@ -11,6 +11,8 @@
 - [ ] 完整备份导出后可在空目录恢复，附件可预览
 - [ ] ASR 断线重连、LLM 超时重试和进程重启恢复均完成验证
 - [ ] 本机模式只监听 loopback
-- [ ] 远程模式启用 token、Origin 白名单和 HTTPS 反向代理
+- [ ] 远程模式启用 token（至少 16 字符）、Origin 白名单和 HTTPS 反向代理
+- [ ] 若经反向代理访问，确认是否应设置 `WORKBENCH_TRUST_PROXY=1`
+- [ ] 远程环境确认是否需要 `WORKBENCH_BLOCK_PRIVATE_PROVIDERS=1`
 - [ ] 已阅读并更新 `SECURITY.md`、`PRIVACY.md` 和 provider 数据流说明
 - [ ] 已确定公开仓库地址、维护者安全联系方式和首个版本号

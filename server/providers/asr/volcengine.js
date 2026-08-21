@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { WebSocket } from "ws";
+import { assertOutboundUrl, createSafeLookup, loadOutboundPolicy } from "../../outbound-url.js";
+
+const MAX_PAYLOAD_BYTES = 1_048_576;
 
 export class VolcengineAsrProvider {
   constructor(config, logger) {
@@ -70,8 +73,12 @@ class VolcengineAsrSession {
   openUpstream() {
     if (this.closed || this.hasSentFinal) return;
     const connectId = crypto.randomUUID();
+    const policy = loadOutboundPolicy();
+    assertOutboundUrl(this.config.url, policy, { protocols: ["ws:", "wss:"], label: "ASR 地址" });
     const upstream = new WebSocket(this.config.url, {
       headers: buildAsrHeaders(this.config, connectId),
+      maxPayload: MAX_PAYLOAD_BYTES,
+      lookup: createSafeLookup(policy),
     });
     this.upstream = upstream;
     this.log("upstream.connecting", { connectId, attempt: this.reconnectAttempts + 1 });
@@ -299,6 +306,7 @@ export function parseServerMessage(buffer) {
     const size = buffer.readUInt32BE(offset);
     offset += 4;
     if (offset + size > buffer.length) throw new Error("Invalid ASR error payload size");
+    if (size > MAX_PAYLOAD_BYTES) throw new Error("ASR payload exceeds 1MB");
     return { type: "error", code, message: buffer.subarray(offset, offset + size).toString("utf8") };
   }
   if (messageType !== 0x9) return { type: "unknown", messageType };
@@ -313,8 +321,21 @@ export function parseServerMessage(buffer) {
   const size = buffer.readUInt32BE(offset);
   offset += 4;
   if (offset + size > buffer.length) throw new Error("Invalid ASR payload size");
+  if (size > MAX_PAYLOAD_BYTES) throw new Error("ASR payload exceeds 1MB");
   let payload = buffer.subarray(offset, offset + size);
-  if (compression === 0x1) payload = zlib.gunzipSync(payload);
+  if (compression === 0x1) {
+    try {
+      payload = zlib.gunzipSync(payload, { maxOutputLength: MAX_PAYLOAD_BYTES });
+    } catch (error) {
+      if (
+        error?.code === "ERR_BUFFER_TOO_LARGE" ||
+        /output length|too large/i.test(String(error?.message || ""))
+      ) {
+        throw new Error("ASR payload exceeds 1MB");
+      }
+      throw error;
+    }
+  }
   if (serialization === 0x1) payload = JSON.parse(payload.toString("utf8"));
   return { type: "response", flags, sequence, payload };
 }
