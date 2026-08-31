@@ -39,6 +39,7 @@ export function createApplication(name = "未命名候选人") {
     resumeNotes: [],
     selectedJdId: "",
     jdDraftName: "",
+    roleShortName: "",
   };
 }
 
@@ -66,6 +67,7 @@ export function createInterview(name = "未命名面试", options = {}) {
     resumeNotes: [],
     selectedJdId: "",
     jdDraftName: "",
+    roleShortName: "",
     lines: [],
     cards: [],
     askedQuestions: [],
@@ -114,6 +116,7 @@ export function applicationMetadataPatch(application) {
     resumeNotes: application.resumeNotes,
     selectedJdId: application.selectedJdId,
     jdDraftName: application.jdDraftName,
+    roleShortName: application.roleShortName,
   };
 }
 
@@ -222,6 +225,8 @@ export function normalizeApplication(application) {
   return {
     ...merged,
     applicationStatus,
+    roleShortName:
+      typeof application?.roleShortName === "string" ? application.roleShortName.trim() : "",
     resumeFile:
       application?.resumeFile && typeof application.resumeFile === "object"
         ? application.resumeFile
@@ -253,6 +258,7 @@ export function normalizeInterview(interview, application = null) {
     resumeNotes: shared.resumeNotes,
     selectedJdId: shared.selectedJdId || "",
     jdDraftName: shared.jdDraftName || "",
+    roleShortName: shared.roleShortName || "",
     roundOrder,
     roundLabel: normalizeStatusLabel(interview?.roundLabel) || roundLabelFor({ roundOrder }),
     roundStatus: inferRoundStatus({ ...merged, roundStatus: interview?.roundStatus }),
@@ -314,6 +320,7 @@ export function normalizeSavedJd(jd) {
   return {
     id: jd?.id || safeId(),
     name: jd?.name || "未命名 JD",
+    shortName: typeof jd?.shortName === "string" ? jd.shortName.trim() : "",
     content: jd?.content || "",
     createdAt: jd?.createdAt || now,
     updatedAt: jd?.updatedAt || jd?.createdAt || now,

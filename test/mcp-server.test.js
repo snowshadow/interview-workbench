@@ -69,6 +69,8 @@ test("MCP server exposes application and interview-round workflows", async () =>
         id: "application-1",
         name: body.name,
         applicationStatus: "active",
+        jdDraftName: body.jdDraftName,
+        roleShortName: body.roleShortName,
       };
       state.interview = {
         id: "round-1",
@@ -149,11 +151,16 @@ test("MCP server exposes application and interview-round workflows", async () =>
     const created = await call(client, "create_interview", {
       name: "Synthetic Candidate",
       interviewStatus: "scheduled",
+      roleName: "量化策略研究负责人",
+      roleShortName: "量化",
       roleMarkdown: "# Role",
     });
     assert.equal(created.linkedSession.session.sessionId, "test-thread");
     assert.equal(created.application.id, "application-1");
+    assert.equal(created.application.jdDraftName, "量化策略研究负责人");
+    assert.equal(created.application.roleShortName, "量化");
     assert.equal(created.interview.applicationId, "application-1");
+    assert.equal(created.interview.roleShortName, "量化");
 
     const applications = await call(client, "list_applications", {
       query: "Synthetic",

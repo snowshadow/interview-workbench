@@ -8,7 +8,7 @@ import { WebSocketServer } from "ws";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createSecurity } from "./security.js";
-import { SqliteStore } from "./storage/sqlite-store.js";
+import { SCHEMA_VERSION, SqliteStore } from "./storage/sqlite-store.js";
 import { createLlmProvider } from "./providers/llm/index.js";
 import { createAsrProvider } from "./providers/asr/index.js";
 import { AnalysisJobService } from "./services/analysis-job-service.js";
@@ -92,7 +92,7 @@ function currentHealth() {
     asrProvider: config.asr.provider,
     asrResourceId: config.asr.resourceId,
     storage: "sqlite",
-    schemaVersion: 5,
+    schemaVersion: SCHEMA_VERSION,
     accessMode: config.accessToken ? "token" : "local-only",
     issues: [
       ...(!asrConfigured ? ["ASR_NOT_CONFIGURED"] : []),
@@ -132,7 +132,8 @@ app.put("/api/store", (req, res) => {
 app.post("/api/applications", (req, res) => {
   try {
     const applicationContext = storeRepository.createApplication(req.body || {});
-    const interview = applicationContext.rounds?.[0] || null;
+    const firstRoundId = applicationContext.rounds?.[0]?.id;
+    const interview = firstRoundId ? storeRepository.getInterview(firstRoundId) : null;
     const nextStore = storeRepository.getStore();
     appendServerLog("application.created", {
       applicationId: applicationContext.id,

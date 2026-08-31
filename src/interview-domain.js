@@ -135,6 +135,12 @@ export function getInterviewRole(interview) {
   return interview?.jdDraftName?.trim() || "未设置岗位";
 }
 
+export function getInterviewRoleLabel(interview) {
+  const shortName =
+    typeof interview?.roleShortName === "string" ? interview.roleShortName.trim() : "";
+  return shortName || getInterviewRole(interview);
+}
+
 export function interviewStatusTone(status, statusColors = {}) {
   return STATUS_COLOR_TONES[statusColorFor(status, statusColors)] || "neutral";
 }

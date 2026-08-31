@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   compareInterviews,
   getInterviewRole,
+  getInterviewRoleLabel,
   inferInterviewStatus,
   interviewStatusTone,
 } from "../src/interview-domain.js";
@@ -12,6 +13,21 @@ test("interview domain defaults stay independent from UI components", () => {
   assert.equal(inferInterviewStatus({ lines: [{ text: "hello" }] }), "已面待定");
   assert.equal(getInterviewRole({}), "未设置岗位");
   assert.equal(interviewStatusTone("自定义状态"), "neutral");
+});
+
+test("calendar role labels come from interview data without inferring job semantics", () => {
+  assert.equal(
+    getInterviewRoleLabel({
+      jdDraftName: "量化策略研究负责人",
+      roleShortName: " 量化 ",
+    }),
+    "量化",
+  );
+  assert.equal(
+    getInterviewRoleLabel({ jdDraftName: "量化策略研究负责人" }),
+    "量化策略研究负责人",
+  );
+  assert.equal(getInterviewRoleLabel({}), "未设置岗位");
 });
 
 test("session sorting uses stable role-specific date rules", () => {

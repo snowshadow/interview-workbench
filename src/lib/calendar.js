@@ -1,4 +1,8 @@
-import { inferRoundStatus, roundLabelFor } from "../interview-domain.js";
+import {
+  getInterviewRoleLabel,
+  inferRoundStatus,
+  roundLabelFor,
+} from "../interview-domain.js";
 
 const DEFAULT_INTERVIEW_DURATION_MS = 60 * 60 * 1000;
 
@@ -73,6 +77,7 @@ export function buildInterviewIcs(interview, now = new Date()) {
   const end = new Date(start.getTime() + DEFAULT_INTERVIEW_DURATION_MS);
   const candidate = String(interview.name || "未命名候选人").trim();
   const role = String(interview.jdDraftName || "未设置岗位").trim();
+  const roleLabel = getInterviewRoleLabel(interview);
   const roundLabel = roundLabelFor(interview);
   const status = inferRoundStatus(interview);
   const uidPart = String(interview.id || `${start.getTime()}-${candidate}`)
@@ -89,7 +94,7 @@ export function buildInterviewIcs(interview, now = new Date()) {
     `DTSTAMP:${formatIcsUtc(now)}`,
     `DTSTART:${formatIcsUtc(start)}`,
     `DTEND:${formatIcsUtc(end)}`,
-    `SUMMARY:${escapeIcsText(`面试 · ${candidate} · ${roundLabel}`)}`,
+    `SUMMARY:${escapeIcsText(`${roleLabel}-${candidate}-${roundLabel}`)}`,
     `DESCRIPTION:${escapeIcsText(`岗位：${role}\n轮次：${roundLabel}\n轮次状态：${status}\n来自灵伴面试工作台`)}`,
     "STATUS:CONFIRMED",
     "CATEGORIES:面试",
