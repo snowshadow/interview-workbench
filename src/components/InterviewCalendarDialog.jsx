@@ -18,7 +18,7 @@ import {
 } from "../lib/calendar.js";
 import {
   getInterviewRole,
-  getInterviewRoleShortLabel,
+  getInterviewRoleLabel,
   inferRoundStatus,
   interviewStatusTone,
   roundDisplayName,
@@ -374,7 +374,7 @@ function CalendarEventButton({
 }) {
   const status = inferRoundStatus(interview);
   const displayName = roundDisplayName(interview);
-  const roleLabel = getInterviewRoleShortLabel(interview);
+  const roleLabel = getInterviewRoleLabel(interview);
   return (
     <button
       aria-label={`${formatTime(new Date(interview.scheduledAt))} ${displayName} ${roleLabel}`}

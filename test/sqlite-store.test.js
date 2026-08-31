@@ -48,6 +48,50 @@ test("legacy JSON migrates without losing interviews and extracts attachments", 
   }
 });
 
+test("JD role short names persist without depending on known job titles", () => {
+  const config = createTestConfig("interview-jd-short-name-");
+  const first = new SqliteStore(config, silentLogger);
+  try {
+    const saved = first.upsertJd({
+      id: "jd-quant",
+      name: "量化策略研究负责人",
+      shortName: " 量化 ",
+      content: "# JD",
+    });
+    assert.equal(saved.shortName, "量化");
+    assert.equal(first.getStore().jdLibrary[0].shortName, "量化");
+    first.upsertJd({
+      id: "jd-quant",
+      name: "量化策略研究负责人",
+      content: "# 更新后的 JD",
+    });
+    assert.equal(first.getStore().jdLibrary[0].shortName, "量化");
+    first.upsertJd({
+      id: "jd-quant",
+      name: "量化策略研究负责人",
+      shortName: "",
+      content: "# 更新后的 JD",
+    });
+    assert.equal(first.getStore().jdLibrary[0].shortName, "");
+    first.upsertJd({
+      id: "jd-quant",
+      name: "量化策略研究负责人",
+      shortName: "量化",
+      content: "# 更新后的 JD",
+    });
+  } finally {
+    first.close();
+  }
+
+  const reopened = new SqliteStore(config, silentLogger);
+  try {
+    assert.equal(reopened.getStore().jdLibrary[0].shortName, "量化");
+  } finally {
+    reopened.close();
+    cleanupTestConfig(config);
+  }
+});
+
 test("replace import rejects invalid payloads without deleting existing rows", () => {
   const config = createTestConfig("interview-replace-guard-");
   const store = new SqliteStore(config, silentLogger);
@@ -105,7 +149,10 @@ test("full export and import preserve attachment bytes", () => {
   const source = new SqliteStore(sourceConfig, silentLogger);
   const target = new SqliteStore(targetConfig, silentLogger);
   try {
-    source.createInterview(sampleInterview());
+    source.createInterview(sampleInterview({
+      jdDraftName: "量化策略研究负责人",
+      roleShortName: "量化",
+    }));
     const bytes = Buffer.from("%PDF-1.4\nbackup roundtrip");
     source.saveAttachment("candidate-1", {
       name: "resume.pdf",
@@ -116,6 +163,8 @@ test("full export and import preserve attachment bytes", () => {
     target.importBackup(exported);
     const imported = target.getInterview("candidate-1");
     const attachment = target.getAttachment(imported.resumeFile.id);
+    assert.equal(imported.roleShortName, "量化");
+    assert.equal(target.getApplication(imported.applicationId).roleShortName, "量化");
     assert.deepEqual(fs.readFileSync(attachment.absolutePath), bytes);
   } finally {
     source.close();
@@ -150,7 +199,9 @@ test("new interviews do not replace the active interview unless explicitly reque
   try {
     const scheduledInterview = (id, name, activate = false) =>
       sampleInterview({ id, name, activate, lines: [], cards: [], askedQuestions: [] });
-    store.createInterview(scheduledInterview("first", "第一场"));
+    const created = store.createInterview(scheduledInterview("first", "第一场"));
+    assert.equal(created.name, "第一场");
+    assert.equal(created.roleMarkdown, "岗位要求");
     store.createInterview(scheduledInterview("second", "第二场"));
     assert.equal(store.getStore().activeInterviewId, "first");
 
@@ -342,17 +393,34 @@ test("applications own shared fields while rounds keep independent lifecycle dat
   const config = createTestConfig();
   const store = new SqliteStore(config, silentLogger);
   try {
+    store.upsertJd({
+      id: "jd-quant",
+      name: "量化策略研究负责人",
+      shortName: "量化",
+      content: "# Agent JD",
+    });
     const application = store.createApplication({
       id: "application-1",
       name: "同一位候选人",
       applicationStatus: "已安排",
       resumeMarkdown: "# 原简历分析",
       roleMarkdown: "# Agent JD",
+      selectedJdId: "jd-quant",
+      jdDraftName: "量化策略研究负责人",
+      roleShortName: "量化",
       firstRound: { id: "round-1", roundLabel: "技术一面" },
     });
     assert.equal(application.rounds.length, 1);
     assert.equal(application.rounds[0].applicationId, "application-1");
+    assert.equal(store.getInterview("round-1").roleShortName, "量化");
     assert.equal(application.rounds[0].roundStatus, "待安排");
+    store.upsertJd({
+      id: "jd-quant",
+      name: "量化策略研究负责人",
+      shortName: "策略库",
+      content: "# Agent JD",
+    });
+    assert.equal(store.getApplication("application-1").roleShortName, "量化");
     assert.throws(
       () => store.createApplication({ id: "application-1", name: "不得覆盖" }),
       (error) => error.code === "APPLICATION_ID_CONFLICT",
@@ -381,6 +449,7 @@ test("applications own shared fields while rounds keep independent lifecycle dat
       },
     });
     assert.equal(secondRound.roundOrder, 2);
+    assert.equal(secondRound.roleShortName, "量化");
     assert.equal(secondRound.roundStatus, "已安排");
     assert.equal(secondRound.outcome, "");
     assert.equal(secondRound.sessionStartedAt, null);
@@ -408,13 +477,22 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     store.patchApplication("application-1", {
       name: "候选人（更新）",
       resumeMarkdown: "# 更新后的共享分析",
+      roleShortName: "策略",
     });
     assert.equal(store.getInterview("round-1").name, "候选人（更新）");
     assert.equal(store.getInterview("round-2").resumeMarkdown, "# 更新后的共享分析");
+    assert.equal(store.getInterview("round-1").roleShortName, "策略");
+    assert.equal(store.getInterview("round-2").roleShortName, "策略");
 
-    store.patchInterview("round-2", { roleMarkdown: "# 更新后的共享 JD", outcome: "通过" });
+    store.patchInterview("round-2", {
+      roleMarkdown: "# 更新后的共享 JD",
+      roleShortName: "研究",
+      outcome: "通过",
+    });
     assert.equal(store.getApplication("application-1").roleMarkdown, "# 更新后的共享 JD");
+    assert.equal(store.getApplication("application-1").roleShortName, "研究");
     assert.equal(store.getInterview("round-1").roleMarkdown, "# 更新后的共享 JD");
+    assert.equal(store.getInterview("round-1").roleShortName, "研究");
     assert.equal(store.getInterview("round-2").outcome, "通过");
 
     const pdf = Buffer.from("%PDF-1.4\nshared resume");
@@ -427,10 +505,12 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     assert.equal(store.getApplication("application-1").resumeFile.id, resume.id);
 
     const snapshot = store.getStore();
-    assert.equal(snapshot.schemaVersion, 5);
+    assert.equal(snapshot.schemaVersion, 6);
     assert.equal(snapshot.applications.length, 1);
     assert.equal(snapshot.interviews.length, 2);
     const exported = store.exportStore();
+    assert.equal(exported.applications[0].roleShortName, "研究");
+    assert.equal(exported.jdLibrary[0].shortName, "策略库");
     assert.match(exported.applications[0].resumeFile.dataUrl, /^data:application\/pdf;base64,/);
     assert.equal(exported.interviews.some((round) => round.resumeFile?.dataUrl), false);
   } finally {
@@ -542,6 +622,91 @@ test("the only active round cannot be deleted independently", () => {
   }
 });
 
+test("schema v5 migration adds empty role short names without inferring them", () => {
+  const config = createTestConfig("interview-schema-v5-role-short-name-");
+  fs.mkdirSync(config.dataDir, { recursive: true });
+  fs.mkdirSync(config.backupDir, { recursive: true });
+  const legacyDb = new DatabaseSync(config.databaseFile);
+  legacyDb.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO meta (key, value) VALUES ('schema_version', '5');
+    CREATE TABLE jd_library (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE applications (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      application_status TEXT NOT NULL,
+      resume_markdown TEXT NOT NULL DEFAULT '',
+      role_markdown TEXT NOT NULL DEFAULT '',
+      resume_notes_json TEXT NOT NULL DEFAULT '[]',
+      selected_jd_id TEXT NOT NULL DEFAULT '',
+      jd_draft_name TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT
+    );
+    CREATE TABLE interviews (
+      id TEXT PRIMARY KEY,
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+      round_order INTEGER NOT NULL DEFAULT 1,
+      round_label TEXT NOT NULL DEFAULT '',
+      round_status TEXT NOT NULL DEFAULT '待安排',
+      outcome TEXT NOT NULL DEFAULT '',
+      round_focus TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      session_started_at TEXT,
+      scheduled_at TEXT,
+      interview_status TEXT NOT NULL,
+      resume_markdown TEXT NOT NULL DEFAULT '',
+      role_markdown TEXT NOT NULL DEFAULT '',
+      resume_notes_json TEXT NOT NULL DEFAULT '[]',
+      selected_jd_id TEXT NOT NULL DEFAULT '',
+      jd_draft_name TEXT NOT NULL DEFAULT '',
+      last_processed_line_count INTEGER NOT NULL DEFAULT 0,
+      speaker_labels_json TEXT NOT NULL DEFAULT '{}',
+      deleted_at TEXT
+    );
+    INSERT INTO jd_library VALUES
+      ('jd-1', '量化策略研究负责人', '# JD', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z');
+    INSERT INTO applications VALUES
+      ('application-1', '候选人', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z',
+       '招聘中', '', '# JD', '[]', 'jd-1', '量化策略研究负责人', NULL);
+    INSERT INTO interviews VALUES
+      ('round-1', 'application-1', 1, '一面', '待安排', '', '', '候选人',
+       '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', NULL, NULL,
+       '招聘中', '', '# JD', '[]', 'jd-1', '量化策略研究负责人', 0, '{}', NULL);
+  `);
+  legacyDb.close();
+
+  const migrated = new SqliteStore(config, silentLogger);
+  try {
+    const snapshot = migrated.getStore();
+    assert.equal(snapshot.schemaVersion, 6);
+    assert.equal(snapshot.jdLibrary[0].name, "量化策略研究负责人");
+    assert.equal(snapshot.jdLibrary[0].shortName, "");
+    assert.equal(snapshot.applications[0].jdDraftName, "量化策略研究负责人");
+    assert.equal(snapshot.applications[0].roleShortName, "");
+    assert.equal(snapshot.interviews[0].roleShortName, "");
+  } finally {
+    migrated.close();
+  }
+
+  const reopened = new SqliteStore(config, silentLogger);
+  try {
+    assert.equal(reopened.getStore().applications[0].roleShortName, "");
+  } finally {
+    reopened.close();
+    cleanupTestConfig(config);
+  }
+});
+
 test("schema v4 migration backs up once and never merges same-name interviews", () => {
   const config = createTestConfig();
   fs.mkdirSync(config.dataDir, { recursive: true });
@@ -593,7 +758,7 @@ test("schema v4 migration backs up once and never merges same-name interviews", 
   const store = new SqliteStore(config, silentLogger);
   try {
     const snapshot = store.getStore();
-    assert.equal(snapshot.schemaVersion, 5);
+    assert.equal(snapshot.schemaVersion, 6);
     assert.deepEqual(snapshot.applications.map((application) => application.id).sort(), ["legacy-1", "legacy-2"]);
     assert.equal(store.getApplicationContext("legacy-1").rounds[0].id, "legacy-1");
     assert.equal(store.getApplicationContext("legacy-2").rounds[0].id, "legacy-2");
@@ -603,7 +768,7 @@ test("schema v4 migration backs up once and never merges same-name interviews", 
       "旧版共享筛选结论",
     );
     const backups = fs.readdirSync(config.backupDir)
-      .filter((name) => name.startsWith("workbench-pre-v5-") && name.endsWith(".sqlite"));
+      .filter((name) => name.startsWith("workbench-pre-v6-") && name.endsWith(".sqlite"));
     assert.equal(backups.length, 1);
     assert.ok(fs.statSync(path.join(config.backupDir, backups[0])).size > 0);
   } finally {

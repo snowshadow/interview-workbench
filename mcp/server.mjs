@@ -82,6 +82,7 @@ server.registerTool("create_interview", {
     roleMarkdown: z.string().max(500000).optional().describe("Job description in Markdown"),
     resumeMarkdown: z.string().max(500000).optional().describe("Resume screening or interview preparation Markdown"),
     roleName: z.string().max(300).optional(),
+    roleShortName: z.string().max(40).optional().describe("Short job name used in calendars"),
     resumePath: z.string().max(2000).optional().describe("Local PDF, DOC, or DOCX path"),
     harness: z.string().max(40).optional(),
     sessionId: z.string().max(200).optional(),
@@ -97,6 +98,7 @@ server.registerTool("create_interview", {
       roleMarkdown: input.roleMarkdown,
       resumeMarkdown: input.resumeMarkdown,
       jdDraftName: input.roleName,
+      roleShortName: input.roleShortName,
     },
   });
   let resumeFile = null;
@@ -315,6 +317,7 @@ function applicationToolSummary(application) {
     name: application.name,
     applicationStatus: application.applicationStatus,
     jdDraftName: application.jdDraftName,
+    roleShortName: application.roleShortName,
     roundCount: application.roundCount ?? application.rounds?.length ?? 0,
     updatedAt: application.updatedAt,
   };
@@ -330,6 +333,7 @@ function interviewRoundToolSummary(interview) {
     roundStatus: interview.roundStatus,
     outcome: interview.outcome,
     roundFocus: interview.roundFocus,
+    roleShortName: interview.roleShortName,
     scheduledAt: interview.scheduledAt,
     createdAt: interview.createdAt,
     updatedAt: interview.updatedAt,

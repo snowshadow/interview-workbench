@@ -112,7 +112,7 @@ export function InterviewFormDialog({
 
             <section className="form-section">
               <h3>岗位与 JD</h3>
-              <div className="form-grid form-grid-jd">
+              <div className="form-grid form-grid-role">
                 <label>
                   <span>已保存 JD</span>
                   <select value={form.selectedJdId} onChange={(event) => onSelectJd(event.target.value)}>
@@ -130,6 +130,15 @@ export function InterviewFormDialog({
                     value={form.jdDraftName}
                     onChange={(event) => onChange({ jdDraftName: event.target.value })}
                     placeholder="例如：大模型应用研发工程师"
+                  />
+                </label>
+                <label>
+                  <span>岗位简称</span>
+                  <input
+                    maxLength={40}
+                    value={form.roleShortName}
+                    onChange={(event) => onChange({ roleShortName: event.target.value })}
+                    placeholder="例如：评测"
                   />
                 </label>
               </div>

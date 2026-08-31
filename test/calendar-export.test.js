@@ -24,7 +24,8 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
     sampleInterview({
       id: "candidate/1",
       name: "张青",
-      jdDraftName: "大模型评测研发负责人",
+      jdDraftName: "量化策略研究负责人",
+      roleShortName: "量化",
       scheduledAt: "2026-07-12T02:00:00.000Z",
       roundStatus: "已安排",
     }),
@@ -36,9 +37,19 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
   assert.match(content, /DTSTAMP:20260710T083000Z/);
   assert.match(content, /DTSTART:20260712T020000Z/);
   assert.match(content, /DTEND:20260712T030000Z/);
-  assert.match(content, /SUMMARY:评测-张青-一面/);
-  assert.match(unfoldedContent, /岗位：大模型评测研发负责人\\n轮次：一面\\n轮次状态：已安排/);
+  assert.match(content, /SUMMARY:量化-张青-一面/);
+  assert.match(unfoldedContent, /岗位：量化策略研究负责人\\n轮次：一面\\n轮次状态：已安排/);
   assert.ok(content.endsWith("\r\n"));
+});
+
+test("buildInterviewIcs falls back to the complete job name when no short name is set", () => {
+  const content = buildInterviewIcs(sampleInterview({
+    name: "林嘉",
+    jdDraftName: "量化策略研究负责人",
+    roleShortName: "",
+  }));
+
+  assert.match(content, /SUMMARY:量化策略研究负责人-林嘉-一面/);
 });
 
 test("calendar date helpers use Monday-based local ranges", () => {

@@ -2808,6 +2808,11 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
   margin-bottom: 12px;
 }
 
+.form-grid-role {
+  grid-template-columns: minmax(180px, 0.9fr) minmax(240px, 1.25fr) minmax(120px, 0.55fr);
+  margin-bottom: 12px;
+}
+
 .checkbox-field {
   grid-template-columns: 16px 1fr;
   align-items: center;
@@ -3043,7 +3048,8 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
   }
 
   .form-grid-basic,
-  .form-grid-jd {
+  .form-grid-jd,
+  .form-grid-role {
     grid-template-columns: 1fr;
   }
 

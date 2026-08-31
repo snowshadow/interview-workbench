@@ -1,5 +1,5 @@
 import {
-  getInterviewSystemCalendarRoleLabel,
+  getInterviewRoleLabel,
   inferRoundStatus,
   roundLabelFor,
 } from "../interview-domain.js";
@@ -77,7 +77,7 @@ export function buildInterviewIcs(interview, now = new Date()) {
   const end = new Date(start.getTime() + DEFAULT_INTERVIEW_DURATION_MS);
   const candidate = String(interview.name || "未命名候选人").trim();
   const role = String(interview.jdDraftName || "未设置岗位").trim();
-  const roleLabel = getInterviewSystemCalendarRoleLabel(interview);
+  const roleLabel = getInterviewRoleLabel(interview);
   const roundLabel = roundLabelFor(interview);
   const status = inferRoundStatus(interview);
   const uidPart = String(interview.id || `${start.getTime()}-${candidate}`)

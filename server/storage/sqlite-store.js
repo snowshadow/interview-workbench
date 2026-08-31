@@ -22,7 +22,7 @@ const APPLICATION_ARTIFACT_COMPAT_KINDS = new Set([
   "application-handoff",
   "final-summary",
 ]);
-const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export class SqliteStore {
   constructor(config, logger) {
@@ -38,7 +38,7 @@ export class SqliteStore {
     this.db = new DatabaseSync(config.databaseFile);
     this.transactionDepth = 0;
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.backupBeforeApplicationMigration(databaseExisted);
+    this.backupBeforeSchemaMigration(databaseExisted);
     this.createSchema();
     this.migrateLegacyStore();
     this.recoverInterruptedJobs();
@@ -50,7 +50,7 @@ export class SqliteStore {
     this.db.close();
   }
 
-  backupBeforeApplicationMigration(databaseExisted) {
+  backupBeforeSchemaMigration(databaseExisted) {
     if (!databaseExisted) return;
     const hasMeta = this.db.prepare(`
       SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
@@ -61,16 +61,23 @@ export class SqliteStore {
     if (currentVersion >= SCHEMA_VERSION) return;
     this.db.exec("PRAGMA wal_checkpoint(FULL)");
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    let target = path.join(this.config.backupDir, `workbench-pre-v5-${timestamp}.sqlite`);
+    let target = path.join(
+      this.config.backupDir,
+      `workbench-pre-v${SCHEMA_VERSION}-${timestamp}.sqlite`,
+    );
     if (fs.existsSync(target)) {
       target = path.join(
         this.config.backupDir,
-        `workbench-pre-v5-${timestamp}-${crypto.randomUUID().slice(0, 8)}.sqlite`,
+        `workbench-pre-v${SCHEMA_VERSION}-${timestamp}-${crypto.randomUUID().slice(0, 8)}.sqlite`,
       );
     }
     fs.copyFileSync(this.config.databaseFile, target, fs.constants.COPYFILE_EXCL);
     trySetPrivateMode(target);
-    this.logger?.info?.("store.pre_v5_backup", { target, schemaVersion: currentVersion });
+    this.logger?.info?.("store.pre_schema_backup", {
+      target,
+      fromSchemaVersion: currentVersion,
+      toSchemaVersion: SCHEMA_VERSION,
+    });
   }
 
   createSchema() {
@@ -88,6 +95,7 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS jd_library (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        short_name TEXT NOT NULL DEFAULT '',
         content TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -103,6 +111,7 @@ export class SqliteStore {
         resume_notes_json TEXT NOT NULL DEFAULT '[]',
         selected_jd_id TEXT NOT NULL DEFAULT '',
         jd_draft_name TEXT NOT NULL DEFAULT '',
+        role_short_name TEXT NOT NULL DEFAULT '',
         deleted_at TEXT
       );
       CREATE INDEX IF NOT EXISTS applications_updated
@@ -137,6 +146,7 @@ export class SqliteStore {
         resume_notes_json TEXT NOT NULL DEFAULT '[]',
         selected_jd_id TEXT NOT NULL DEFAULT '',
         jd_draft_name TEXT NOT NULL DEFAULT '',
+        role_short_name TEXT NOT NULL DEFAULT '',
         last_processed_line_count INTEGER NOT NULL DEFAULT 0,
         speaker_labels_json TEXT NOT NULL DEFAULT '{}',
         deleted_at TEXT
@@ -252,6 +262,16 @@ export class SqliteStore {
   }
 
   migrateApplicationSchema() {
+    const jdColumns = this.db.prepare("PRAGMA table_info(jd_library)").all();
+    if (!jdColumns.some((column) => column.name === "short_name")) {
+      this.db.exec("ALTER TABLE jd_library ADD COLUMN short_name TEXT NOT NULL DEFAULT ''");
+    }
+
+    const applicationColumns = this.db.prepare("PRAGMA table_info(applications)").all();
+    if (!applicationColumns.some((column) => column.name === "role_short_name")) {
+      this.db.exec("ALTER TABLE applications ADD COLUMN role_short_name TEXT NOT NULL DEFAULT ''");
+    }
+
     const interviewColumns = this.db.prepare("PRAGMA table_info(interviews)").all();
     const hasInterviewColumn = (name) => interviewColumns.some((column) => column.name === name);
     if (!hasInterviewColumn("application_id")) {
@@ -272,6 +292,9 @@ export class SqliteStore {
     if (!hasInterviewColumn("round_focus")) {
       this.db.exec("ALTER TABLE interviews ADD COLUMN round_focus TEXT NOT NULL DEFAULT ''");
     }
+    if (!hasInterviewColumn("role_short_name")) {
+      this.db.exec("ALTER TABLE interviews ADD COLUMN role_short_name TEXT NOT NULL DEFAULT ''");
+    }
 
     const attachmentColumns = this.db.prepare("PRAGMA table_info(attachments)").all();
     if (!attachmentColumns.some((column) => column.name === "application_id")) {
@@ -284,10 +307,11 @@ export class SqliteStore {
       this.db.exec(`
         INSERT OR IGNORE INTO applications
           (id, name, created_at, updated_at, application_status, resume_markdown,
-           role_markdown, resume_notes_json, selected_jd_id, jd_draft_name, deleted_at)
+           role_markdown, resume_notes_json, selected_jd_id, jd_draft_name,
+           role_short_name, deleted_at)
         SELECT COALESCE(NULLIF(application_id, ''), id), name, created_at, updated_at,
           interview_status, resume_markdown, role_markdown, resume_notes_json,
-          selected_jd_id, jd_draft_name, deleted_at
+          selected_jd_id, jd_draft_name, role_short_name, deleted_at
         FROM interviews
         ORDER BY round_order, created_at
       `);
@@ -504,6 +528,7 @@ export class SqliteStore {
       resumeNotes: application.resumeNotes,
       selectedJdId: application.selectedJdId,
       jdDraftName: application.jdDraftName,
+      roleShortName: application.roleShortName,
       lines: Array.isArray(firstRoundPayload.lines) ? firstRoundPayload.lines : [],
       cards: Array.isArray(firstRoundPayload.cards) ? firstRoundPayload.cards : [],
       askedQuestions: Array.isArray(firstRoundPayload.askedQuestions) ? firstRoundPayload.askedQuestions : [],
@@ -563,6 +588,7 @@ export class SqliteStore {
       resumeNotes: application.resumeNotes,
       selectedJdId: application.selectedJdId,
       jdDraftName: application.jdDraftName,
+      roleShortName: application.roleShortName,
       // A new round may inherit only Application-owned material. Round-owned
       // evidence and sessions always start empty, even if a legacy caller sends them.
       lines: [],
@@ -591,7 +617,8 @@ export class SqliteStore {
       id: existingApplicationId || payload.id,
       firstRound: { ...payload, id: payload.id },
     });
-    return context?.rounds?.[0] || null;
+    const firstRoundId = context?.rounds?.[0]?.id;
+    return firstRoundId ? this.getInterview(firstRoundId) : null;
   }
 
   setActiveInterview(id) {
@@ -661,12 +688,14 @@ export class SqliteStore {
       WHERE deleted_at IS NULL
         AND (? = '' OR application_status = ?)
         AND (? = '' OR LOWER(name) LIKE '%' || ? || '%'
-          OR LOWER(jd_draft_name) LIKE '%' || ? || '%')
+          OR LOWER(jd_draft_name) LIKE '%' || ? || '%'
+          OR LOWER(role_short_name) LIKE '%' || ? || '%')
       ORDER BY updated_at DESC
       LIMIT ?
     `).all(
       normalizedStatus,
       normalizedStatus,
+      normalizedQuery,
       normalizedQuery,
       normalizedQuery,
       normalizedQuery,
@@ -679,6 +708,7 @@ export class SqliteStore {
       interviewStatus: row.application_status,
       selectedJdId: row.selected_jd_id,
       jdDraftName: row.jd_draft_name,
+      roleShortName: row.role_short_name,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       roundCount: row.round_count,
@@ -704,6 +734,7 @@ export class SqliteStore {
         "resumeNotes",
         "selectedJdId",
         "jdDraftName",
+        "roleShortName",
       ]),
       createdAt: current.createdAt,
       updatedAt: new Date().toISOString(),
@@ -843,6 +874,7 @@ export class SqliteStore {
           interviews.scheduled_at, interviews.session_started_at,
           interviews.created_at, interviews.updated_at,
           applications.jd_draft_name, applications.selected_jd_id,
+          applications.role_short_name,
           (SELECT COUNT(*) FROM transcript_lines WHERE interview_id = interviews.id) AS transcript_line_count,
           (SELECT COUNT(*) FROM interview_artifacts WHERE interview_id = interviews.id) AS artifact_count
         FROM interviews
@@ -850,13 +882,15 @@ export class SqliteStore {
         WHERE interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
           AND (? = '' OR applications.application_status = ?)
           AND (? = '' OR LOWER(applications.name) LIKE '%' || ? || '%'
-            OR LOWER(applications.jd_draft_name) LIKE '%' || ? || '%')
+            OR LOWER(applications.jd_draft_name) LIKE '%' || ? || '%'
+            OR LOWER(applications.role_short_name) LIKE '%' || ? || '%')
         ORDER BY COALESCE(interviews.scheduled_at, interviews.updated_at) DESC
         LIMIT ?
       `)
       .all(
         normalizedStatus,
         normalizedStatus,
+        normalizedQuery,
         normalizedQuery,
         normalizedQuery,
         normalizedQuery,
@@ -876,6 +910,7 @@ export class SqliteStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       roleName: row.jd_draft_name,
+      roleShortName: row.role_short_name,
       selectedJdId: row.selected_jd_id,
       transcriptLineCount: row.transcript_line_count,
       artifactCount: row.artifact_count,
@@ -913,6 +948,7 @@ export class SqliteStore {
       "resumeNotes",
       "selectedJdId",
       "jdDraftName",
+      "roleShortName",
     ]);
     if ("interviewStatus" in (patch || {}) || "applicationStatus" in (patch || {}) || "status" in (patch || {})) {
       sharedPatch.applicationStatus = patch.applicationStatus || patch.interviewStatus || patch.status;
@@ -1122,18 +1158,31 @@ export class SqliteStore {
 
   upsertJd(jd) {
     const now = new Date().toISOString();
+    const id = cleanId(jd?.id) || crypto.randomUUID();
+    const current = this.db.prepare("SELECT short_name FROM jd_library WHERE id = ?").get(id);
+    const hasShortName = Object.prototype.hasOwnProperty.call(jd || {}, "shortName");
     const value = {
-      id: cleanId(jd?.id) || crypto.randomUUID(),
+      id,
       name: cleanText(jd?.name, 300) || "未命名 JD",
+      shortName: hasShortName ? cleanText(jd?.shortName, 40) : current?.short_name || "",
       content: cleanText(jd?.content, 500000),
       createdAt: normalizeDate(jd?.createdAt) || now,
       updatedAt: normalizeDate(jd?.updatedAt) || now,
     };
     this.db.prepare(`
-      INSERT INTO jd_library (id, name, content, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name, content=excluded.content, updated_at=excluded.updated_at
-    `).run(value.id, value.name, value.content, value.createdAt, value.updatedAt);
+      INSERT INTO jd_library (id, name, short_name, content, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, short_name=excluded.short_name,
+        content=excluded.content, updated_at=excluded.updated_at
+    `).run(
+      value.id,
+      value.name,
+      value.shortName,
+      value.content,
+      value.createdAt,
+      value.updatedAt,
+    );
     return value;
   }
 
@@ -1535,6 +1584,7 @@ export class SqliteStore {
       resumeNotes: application.resumeNotes,
       selectedJdId: application.selectedJdId,
       jdDraftName: application.jdDraftName,
+      roleShortName: application.roleShortName,
       ...(includeLines ? { lines } : {}),
       transcriptLineCount,
       cards,
@@ -1605,14 +1655,15 @@ export class SqliteStore {
     this.db.prepare(`
       INSERT INTO applications
         (id, name, created_at, updated_at, application_status, resume_markdown,
-         role_markdown, resume_notes_json, selected_jd_id, jd_draft_name)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         role_markdown, resume_notes_json, selected_jd_id, jd_draft_name, role_short_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name=excluded.name, updated_at=excluded.updated_at,
         application_status=excluded.application_status,
         resume_markdown=excluded.resume_markdown, role_markdown=excluded.role_markdown,
         resume_notes_json=excluded.resume_notes_json,
         selected_jd_id=excluded.selected_jd_id, jd_draft_name=excluded.jd_draft_name,
+        role_short_name=excluded.role_short_name,
         deleted_at=NULL
     `).run(
       value.id,
@@ -1625,13 +1676,15 @@ export class SqliteStore {
       JSON.stringify(value.resumeNotes),
       value.selectedJdId,
       value.jdDraftName,
+      value.roleShortName,
     );
   }
 
   syncApplicationSharedFields(application) {
     this.db.prepare(`
       UPDATE interviews SET name = ?, interview_status = ?, resume_markdown = ?,
-        role_markdown = ?, resume_notes_json = ?, selected_jd_id = ?, jd_draft_name = ?
+        role_markdown = ?, resume_notes_json = ?, selected_jd_id = ?, jd_draft_name = ?,
+        role_short_name = ?
       WHERE application_id = ?
     `).run(
       application.name,
@@ -1641,6 +1694,7 @@ export class SqliteStore {
       JSON.stringify(application.resumeNotes),
       application.selectedJdId,
       application.jdDraftName,
+      application.roleShortName,
       application.id,
     );
   }
@@ -1652,8 +1706,9 @@ export class SqliteStore {
         (id, application_id, round_order, round_label, round_status, outcome, round_focus,
          name, created_at, updated_at, session_started_at, scheduled_at,
          interview_status, resume_markdown, role_markdown, resume_notes_json,
-         selected_jd_id, jd_draft_name, last_processed_line_count, speaker_labels_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         selected_jd_id, jd_draft_name, role_short_name,
+         last_processed_line_count, speaker_labels_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         application_id=excluded.application_id, round_order=excluded.round_order,
         round_label=excluded.round_label, round_status=excluded.round_status,
@@ -1663,6 +1718,7 @@ export class SqliteStore {
         interview_status=excluded.interview_status, resume_markdown=excluded.resume_markdown,
         role_markdown=excluded.role_markdown, resume_notes_json=excluded.resume_notes_json,
         selected_jd_id=excluded.selected_jd_id, jd_draft_name=excluded.jd_draft_name,
+        role_short_name=excluded.role_short_name,
         last_processed_line_count=excluded.last_processed_line_count,
         speaker_labels_json=excluded.speaker_labels_json, deleted_at=NULL
     `).run(
@@ -1684,6 +1740,7 @@ export class SqliteStore {
       JSON.stringify(value.resumeNotes),
       value.selectedJdId,
       value.jdDraftName,
+      value.roleShortName,
       value.lastProcessedLineCount,
       JSON.stringify(value.speakerLabels),
     );
@@ -1807,6 +1864,7 @@ function normalizeApplication(application) {
     resumeNotes: Array.isArray(application?.resumeNotes) ? application.resumeNotes : [],
     selectedJdId: cleanText(application?.selectedJdId, 160),
     jdDraftName: cleanText(application?.jdDraftName || application?.jdName, 300),
+    roleShortName: cleanText(application?.roleShortName, 40),
   };
 }
 
@@ -1832,6 +1890,7 @@ function normalizeInterview(interview) {
     resumeNotes: Array.isArray(interview?.resumeNotes) ? interview.resumeNotes : [],
     selectedJdId: cleanText(interview?.selectedJdId, 160),
     jdDraftName: cleanText(interview?.jdDraftName, 300),
+    roleShortName: cleanText(interview?.roleShortName, 40),
     lines: Array.isArray(interview?.lines) ? interview.lines : [],
     cards: Array.isArray(interview?.cards) ? interview.cards : [],
     askedQuestions: Array.isArray(interview?.askedQuestions) ? interview.askedQuestions : [],
@@ -1868,6 +1927,7 @@ function sharedFieldsForInterview(application) {
     resumeNotes: application.resumeNotes,
     selectedJdId: application.selectedJdId,
     jdDraftName: application.jdDraftName,
+    roleShortName: application.roleShortName,
   };
 }
 
@@ -1952,6 +2012,7 @@ function mapApplication(row) {
     resumeNotes: parseJson(row.resume_notes_json, []),
     selectedJdId: row.selected_jd_id,
     jdDraftName: row.jd_draft_name,
+    roleShortName: row.role_short_name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1961,6 +2022,7 @@ function mapJd(row) {
   return {
     id: row.id,
     name: row.name,
+    shortName: row.short_name,
     content: row.content,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

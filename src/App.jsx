@@ -123,6 +123,7 @@ const EMPTY_APPLICATION = {
   resumeNotes: [],
   selectedJdId: "",
   jdDraftName: "",
+  roleShortName: "",
 };
 const EMPTY_INTERVIEW = {
   id: "",
@@ -140,6 +141,7 @@ const EMPTY_INTERVIEW = {
   resumeFile: null,
   resumeNotes: [],
   jdDraftName: "",
+  roleShortName: "",
   lines: [],
   cards: [],
   askedQuestions: [],
@@ -679,6 +681,7 @@ function App() {
       applicationStatus: sourceApplication?.applicationStatus || "招聘中",
       selectedJdId: sourceApplication?.selectedJdId || "",
       jdDraftName: sourceApplication?.jdDraftName || "",
+      roleShortName: sourceApplication?.roleShortName || "",
       roleMarkdown: sourceApplication?.roleMarkdown || "",
       resumeMarkdown: sourceApplication?.resumeMarkdown || "",
       resumeFile: sourceApplication?.resumeFile || null,
@@ -701,7 +704,12 @@ function App() {
 
   function selectFormJd(jdId) {
     if (!jdId) {
-      patchInterviewForm({ selectedJdId: "", jdDraftName: "", roleMarkdown: "" });
+      patchInterviewForm({
+        selectedJdId: "",
+        jdDraftName: "",
+        roleShortName: "",
+        roleMarkdown: "",
+      });
       return;
     }
     const savedJd = store.jdLibrary.find((item) => item.id === jdId);
@@ -709,6 +717,7 @@ function App() {
     patchInterviewForm({
       selectedJdId: savedJd.id,
       jdDraftName: savedJd.name,
+      roleShortName: savedJd.shortName || "",
       roleMarkdown: savedJd.content,
     });
   }
@@ -809,6 +818,7 @@ function App() {
         const applicationStatusValue = normalizeStatusLabel(interviewForm.applicationStatus);
         if (!applicationStatusValue) throw new Error("请填写应聘流程状态");
         const roleMarkdownValue = interviewForm.roleMarkdown.trim();
+        const roleShortNameValue = interviewForm.roleShortName.trim();
         const jdName =
           interviewForm.jdDraftName.trim() ||
           extractMarkdownTitle(roleMarkdownValue) ||
@@ -824,6 +834,7 @@ function App() {
             body: JSON.stringify({
               id: existing?.id || safeId(),
               name: jdName || existing?.name || `JD ${store.jdLibrary.length + 1}`,
+              shortName: roleShortNameValue,
               content: roleMarkdownValue,
               createdAt: existing?.createdAt,
             }),
@@ -836,6 +847,7 @@ function App() {
           applicationStatus: applicationStatusValue,
           selectedJdId: nextJdId,
           jdDraftName: jdName,
+          roleShortName: roleShortNameValue,
           roleMarkdown: roleMarkdownValue,
           resumeMarkdown: interviewForm.resumeMarkdown,
           ...(interviewForm.resumeFileChanged ? { resumeNotes: [] } : {}),
