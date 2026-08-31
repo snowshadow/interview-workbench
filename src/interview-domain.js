@@ -135,6 +135,42 @@ export function getInterviewRole(interview) {
   return interview?.jdDraftName?.trim() || "未设置岗位";
 }
 
+export function getInterviewRoleShortLabel(interview) {
+  const role = getInterviewRole(interview);
+  if (role === "未设置岗位") return "岗位待定";
+
+  const knownRole = [
+    [/智能硬件|硬件产品/, "硬件产品"],
+    [/实时语音|语音.*多模态|多模态.*语音/, "实时语音"],
+    [/大模型评测|评测研发|LLM.*评测/i, "大模型评测"],
+    [/大模型应用|角色对话|Agent.*应用|应用研发/i, "Agent 应用"],
+    [/Agent.*(?:技术负责人|架构)|Agent 架构/i, "Agent 架构"],
+  ].find(([pattern]) => pattern.test(role));
+  if (knownRole) return knownRole[1];
+
+  const baseRole = role
+    .replace(/\s*[（(].*$/, "")
+    .replace(/(?:高级|资深)?(?:研发)?(?:工程师|负责人|产品经理)$/, "")
+    .trim();
+  return Array.from(baseRole || role).slice(0, 6).join("");
+}
+
+export function getInterviewSystemCalendarRoleLabel(interview) {
+  const displayLabel = getInterviewRoleShortLabel(interview);
+  const systemCalendarLabels = {
+    "大模型评测": "评测",
+    "Agent 架构": "架构",
+    "Agent 应用": "应用",
+    "实时语音": "语音",
+    "硬件产品": "硬件",
+    "岗位待定": "岗位",
+  };
+  return (
+    systemCalendarLabels[displayLabel] ||
+    Array.from(displayLabel.replace(/\s+/g, "")).slice(0, 4).join("")
+  );
+}
+
 export function interviewStatusTone(status, statusColors = {}) {
   return STATUS_COLOR_TONES[statusColorFor(status, statusColors)] || "neutral";
 }

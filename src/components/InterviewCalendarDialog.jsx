@@ -18,6 +18,7 @@ import {
 } from "../lib/calendar.js";
 import {
   getInterviewRole,
+  getInterviewRoleShortLabel,
   inferRoundStatus,
   interviewStatusTone,
   roundDisplayName,
@@ -373,9 +374,10 @@ function CalendarEventButton({
 }) {
   const status = inferRoundStatus(interview);
   const displayName = roundDisplayName(interview);
+  const roleLabel = getInterviewRoleShortLabel(interview);
   return (
     <button
-      aria-label={`${formatTime(new Date(interview.scheduledAt))} ${displayName}`}
+      aria-label={`${formatTime(new Date(interview.scheduledAt))} ${displayName} ${roleLabel}`}
       className={`calendar-event ${compact ? "compact" : ""} ${
         isSelected ? "selected" : ""
       } tone-${interviewStatusTone(status, statusColors)}`}
@@ -384,8 +386,23 @@ function CalendarEventButton({
       title={`${displayName} · ${getInterviewRole(interview)}`}
       type="button"
     >
-      {compact ? <span>{time}</span> : <strong>{displayName}</strong>}
-      <span>{compact ? displayName : formatTime(new Date(interview.scheduledAt))}</span>
+      {compact ? (
+        <>
+          <span className="calendar-event-time">{time}</span>
+          <span className="calendar-event-name">{displayName}</span>
+          <span className="calendar-event-role-tag">{roleLabel}</span>
+        </>
+      ) : (
+        <>
+          <strong>{displayName}</strong>
+          <span className="calendar-event-meta">
+            <span className="calendar-event-time">
+              {formatTime(new Date(interview.scheduledAt))}
+            </span>
+            <span className="calendar-event-role-tag">{roleLabel}</span>
+          </span>
+        </>
+      )}
     </button>
   );
 }

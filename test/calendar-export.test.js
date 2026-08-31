@@ -23,8 +23,8 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
   const content = buildInterviewIcs(
     sampleInterview({
       id: "candidate/1",
-      name: "林,嘉",
-      jdDraftName: "Agent;工程师",
+      name: "张青",
+      jdDraftName: "大模型评测研发负责人",
       scheduledAt: "2026-07-12T02:00:00.000Z",
       roundStatus: "已安排",
     }),
@@ -36,8 +36,8 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
   assert.match(content, /DTSTAMP:20260710T083000Z/);
   assert.match(content, /DTSTART:20260712T020000Z/);
   assert.match(content, /DTEND:20260712T030000Z/);
-  assert.match(content, /SUMMARY:面试 · 林\\,嘉 · 一面/);
-  assert.match(unfoldedContent, /岗位：Agent\\;工程师\\n轮次：一面\\n轮次状态：已安排/);
+  assert.match(content, /SUMMARY:评测-张青-一面/);
+  assert.match(unfoldedContent, /岗位：大模型评测研发负责人\\n轮次：一面\\n轮次状态：已安排/);
   assert.ok(content.endsWith("\r\n"));
 });
 
