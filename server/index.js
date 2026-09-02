@@ -261,7 +261,8 @@ app.post("/api/interviews", (req, res) => {
 app.get("/api/interviews", (req, res) => {
   const interviews = storeRepository.listInterviews({
     query: req.query.query,
-    status: req.query.status,
+    applicationStatus: req.query.applicationStatus || req.query.status,
+    roundStatus: req.query.roundStatus,
     limit: req.query.limit,
   });
   res.json({ interviews });

@@ -2,27 +2,44 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  APPLICATION_STATUS_PRESETS,
+  DEFAULT_APPLICATION_STATUS,
+  DEFAULT_INTERVIEW_DURATION_MINUTES,
+  MAX_INTERVIEW_DURATION_MINUTES,
+  MIN_INTERVIEW_DURATION_MINUTES,
+  ROUND_STATUS_OPTIONS,
+  isRetiredApplicationStatus,
+  isValidInterviewDurationMinutes,
+  normalizeStatusLabel,
+  resolveInterviewDurationMinutes,
+} from "../../src/interview-domain.js";
 
 const STATUS_COLORS = new Set(["gray", "blue", "green", "amber", "red", "purple"]);
-const DEFAULT_STATUS_OPTIONS = [
-  { value: "未面", color: "gray" },
-  { value: "已安排", color: "amber" },
-  { value: "面试中", color: "blue" },
-  { value: "已面待定", color: "gray" },
-  { value: "一面通过", color: "green" },
-  { value: "未通过", color: "red" },
-  { value: "放弃/归档", color: "red" },
-];
+const DEFAULT_STATUS_OPTIONS = APPLICATION_STATUS_PRESETS;
 const DEFAULT_STATUSES = DEFAULT_STATUS_OPTIONS.map(({ value }) => value);
-const ROUND_STATUSES = new Set(["待安排", "已安排", "进行中", "已结束", "已取消"]);
-const APPLICATION_CONTEXT_ARTIFACT_KINDS = new Set(["round-handoff", "interview-summary"]);
-const APPLICATION_ARTIFACT_COMPAT_KINDS = new Set([
+const ROUND_STATUSES = new Set(ROUND_STATUS_OPTIONS);
+const LEGACY_MIRRORED_APPLICATION_ARTIFACT_KINDS = new Set([
   "resume-screening",
   "process-brief",
   "application-handoff",
   "final-summary",
 ]);
-export const SCHEMA_VERSION = 6;
+const LEGACY_APPLICATION_CONTEXT_KINDS = new Set([
+  "process-brief",
+  "application-handoff",
+  "final-summary",
+]);
+const LEGACY_KNOWN_ARTIFACT_KINDS = new Set([
+  "resume-screening",
+  "interview-preparation",
+  "interview-summary",
+  "round-handoff",
+  "process-brief",
+  "application-handoff",
+  "final-summary",
+]);
+export const SCHEMA_VERSION = 7;
 
 export class SqliteStore {
   constructor(config, logger) {
@@ -140,6 +157,12 @@ export class SqliteStore {
         updated_at TEXT NOT NULL,
         session_started_at TEXT,
         scheduled_at TEXT,
+        duration_minutes INTEGER NOT NULL DEFAULT ${DEFAULT_INTERVIEW_DURATION_MINUTES}
+          CHECK(
+            typeof(duration_minutes) = 'integer'
+            AND duration_minutes BETWEEN ${MIN_INTERVIEW_DURATION_MINUTES}
+              AND ${MAX_INTERVIEW_DURATION_MINUTES}
+          ),
         interview_status TEXT NOT NULL,
         resume_markdown TEXT NOT NULL DEFAULT '',
         role_markdown TEXT NOT NULL DEFAULT '',
@@ -210,6 +233,8 @@ export class SqliteStore {
         markdown TEXT NOT NULL,
         source_harness TEXT NOT NULL DEFAULT '',
         source_session_id TEXT NOT NULL DEFAULT '',
+        include_in_cross_round_context INTEGER NOT NULL DEFAULT 0
+          CHECK(include_in_cross_round_context IN (0, 1)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(interview_id, kind)
@@ -224,6 +249,8 @@ export class SqliteStore {
         markdown TEXT NOT NULL,
         source_harness TEXT NOT NULL DEFAULT '',
         source_session_id TEXT NOT NULL DEFAULT '',
+        include_in_cross_round_context INTEGER NOT NULL DEFAULT 0
+          CHECK(include_in_cross_round_context IN (0, 1)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(application_id, kind)
@@ -262,6 +289,7 @@ export class SqliteStore {
   }
 
   migrateApplicationSchema() {
+    const storedSchemaVersion = Number(this.getMeta("schema_version")) || 0;
     const jdColumns = this.db.prepare("PRAGMA table_info(jd_library)").all();
     if (!jdColumns.some((column) => column.name === "short_name")) {
       this.db.exec("ALTER TABLE jd_library ADD COLUMN short_name TEXT NOT NULL DEFAULT ''");
@@ -295,6 +323,60 @@ export class SqliteStore {
     if (!hasInterviewColumn("role_short_name")) {
       this.db.exec("ALTER TABLE interviews ADD COLUMN role_short_name TEXT NOT NULL DEFAULT ''");
     }
+    this.transaction(() => {
+      if (!hasInterviewColumn("duration_minutes")) {
+        this.db.exec(`
+          ALTER TABLE interviews ADD COLUMN duration_minutes INTEGER NOT NULL
+            DEFAULT ${DEFAULT_INTERVIEW_DURATION_MINUTES}
+            CHECK(
+              typeof(duration_minutes) = 'integer'
+              AND duration_minutes BETWEEN ${MIN_INTERVIEW_DURATION_MINUTES}
+                AND ${MAX_INTERVIEW_DURATION_MINUTES}
+            )
+        `);
+      }
+
+      const interviewArtifactColumns = this.db.prepare("PRAGMA table_info(interview_artifacts)").all();
+      if (!interviewArtifactColumns.some((column) => column.name === "include_in_cross_round_context")) {
+        this.db.exec(`
+          ALTER TABLE interview_artifacts
+          ADD COLUMN include_in_cross_round_context INTEGER NOT NULL DEFAULT 0
+            CHECK(include_in_cross_round_context IN (0, 1))
+        `);
+      }
+
+      const applicationArtifactColumns = this.db.prepare("PRAGMA table_info(application_artifacts)").all();
+      if (!applicationArtifactColumns.some((column) => column.name === "include_in_cross_round_context")) {
+        this.db.exec(`
+          ALTER TABLE application_artifacts
+          ADD COLUMN include_in_cross_round_context INTEGER NOT NULL DEFAULT 0
+            CHECK(include_in_cross_round_context IN (0, 1))
+        `);
+      }
+
+      // This marker makes an interrupted migration retryable. The fail-closed
+      // column default prevents private or preparatory artifacts from leaking.
+      if (!this.getMeta("artifact_context_policy_v7")) {
+        this.db.exec(`
+          UPDATE interview_artifacts
+          SET include_in_cross_round_context = CASE
+            WHEN kind = 'round-handoff' THEN 1
+            WHEN kind = 'interview-summary' AND NOT EXISTS (
+              SELECT 1 FROM interview_artifacts AS handoff
+              WHERE handoff.interview_id = interview_artifacts.interview_id
+                AND handoff.kind = 'round-handoff'
+            ) THEN 1
+            ELSE 0
+          END;
+          UPDATE application_artifacts
+          SET include_in_cross_round_context = CASE
+            WHEN kind IN ('process-brief', 'application-handoff', 'final-summary') THEN 1
+            ELSE 0
+          END;
+        `);
+        this.setMeta("artifact_context_policy_v7", new Date().toISOString());
+      }
+    });
 
     const attachmentColumns = this.db.prepare("PRAGMA table_info(attachments)").all();
     if (!attachmentColumns.some((column) => column.name === "application_id")) {
@@ -341,7 +423,9 @@ export class SqliteStore {
         )
         WHERE application_id IS NULL OR application_id = ''
       `);
-      this.promoteLegacyApplicationArtifacts();
+      this.promoteLegacyApplicationArtifacts({
+        preserveContextFlag: storedSchemaVersion >= SCHEMA_VERSION,
+      });
     });
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS interviews_application_round
@@ -432,22 +516,36 @@ export class SqliteStore {
     if (replace) assertImportableStore(store);
     const interviews = Array.isArray(store?.interviews) ? store.interviews : [];
     const applications = Array.isArray(store?.applications) ? store.applications : [];
+    const sourceSchemaVersion = Number(store?.schemaVersion) || 0;
+    const allowLegacyArtifactContextFallback = sourceSchemaVersion < SCHEMA_VERSION;
     if (replace) {
       this.db.exec(
         "DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interview_artifacts; DELETE FROM application_artifacts; DELETE FROM harness_sessions; DELETE FROM attachments; DELETE FROM interviews; DELETE FROM applications; DELETE FROM jd_library;",
       );
     }
-    for (const [index, status] of normalizeStatuses(store?.statusOptions, interviews).entries()) {
+    for (const [index, status] of normalizeStatuses(
+      store?.statusOptions,
+      applications,
+      interviews,
+    ).entries()) {
       this.addStatus(status, index);
       const color = normalizeStatusColor(store?.statusColors?.[status]);
       if (color) this.setStatusColor(status, color);
     }
     for (const jd of Array.isArray(store?.jdLibrary) ? store.jdLibrary : []) this.upsertJd(jd);
-    for (const application of applications) this.upsertApplicationSnapshot(application);
-    for (const interview of interviews) {
-      this.upsertInterviewSnapshot(interview, { mirrorApplicationArtifacts: false });
+    for (const application of applications) {
+      this.upsertApplicationSnapshot(application, { allowLegacyArtifactContextFallback });
     }
-    this.promoteLegacyApplicationArtifacts();
+    for (const interview of interviews) {
+      this.upsertInterviewSnapshot(interview, {
+        mirrorApplicationArtifacts: false,
+        allowLegacyArtifactContextFallback,
+        preserveArtifactTimestamps: true,
+      });
+    }
+    this.promoteLegacyApplicationArtifacts({
+      preserveContextFlag: sourceSchemaVersion >= SCHEMA_VERSION,
+    });
     for (const application of applications) {
       if (!application.resumeFile?.dataUrl) continue;
       try {
@@ -463,29 +561,40 @@ export class SqliteStore {
     return this.getStore();
   }
 
-  promoteLegacyApplicationArtifacts() {
+  promoteLegacyApplicationArtifacts({ preserveContextFlag = false } = {}) {
     // Older integrations could save process-wide artifacts on the only
     // interview row. Fill only missing Application artifacts so an explicit,
     // newer Application-level value always wins during import.
+    const contextExpression = preserveContextFlag
+      ? "interview_artifacts.include_in_cross_round_context"
+      : `CASE
+          WHEN interview_artifacts.kind IN ('process-brief', 'application-handoff', 'final-summary') THEN 1
+          ELSE 0
+        END`;
     this.db.exec(`
       INSERT OR IGNORE INTO application_artifacts
         (id, application_id, kind, title, markdown, source_harness,
-         source_session_id, created_at, updated_at)
+         source_session_id, include_in_cross_round_context, created_at, updated_at)
       SELECT lower(hex(randomblob(16))), interviews.application_id,
         interview_artifacts.kind, interview_artifacts.title,
         interview_artifacts.markdown, interview_artifacts.source_harness,
-        interview_artifacts.source_session_id, interview_artifacts.created_at,
+        interview_artifacts.source_session_id,
+        ${contextExpression},
+        interview_artifacts.created_at,
         interview_artifacts.updated_at
       FROM interview_artifacts
       JOIN interviews ON interviews.id = interview_artifacts.interview_id
       WHERE interview_artifacts.kind IN
         ('resume-screening', 'process-brief', 'application-handoff', 'final-summary')
-      ORDER BY interview_artifacts.updated_at DESC
+      ORDER BY interview_artifacts.updated_at DESC,
+        interviews.round_order DESC,
+        interview_artifacts.created_at DESC
     `);
   }
 
   createApplication(payload = {}) {
     const now = new Date().toISOString();
+    assertWritableApplicationStatus(requestedApplicationStatus(payload));
     const applicationId = cleanId(payload.id || payload.applicationId) || crypto.randomUUID();
     if (this.db.prepare("SELECT 1 FROM applications WHERE id = ?").get(applicationId)) {
       const error = new Error("应聘流程 ID 已存在");
@@ -521,6 +630,7 @@ export class SqliteStore {
       updatedAt: now,
       sessionStartedAt: normalizeDate(firstRoundPayload.sessionStartedAt),
       scheduledAt: normalizeDate(firstRoundPayload.scheduledAt || firstRoundPayload.interviewTime),
+      durationMinutes: requestedInterviewDurationMinutes(firstRoundPayload.durationMinutes),
       interviewStatus: application.applicationStatus,
       resumeMarkdown: application.resumeMarkdown,
       roleMarkdown: application.roleMarkdown,
@@ -581,6 +691,7 @@ export class SqliteStore {
       updatedAt: now,
       sessionStartedAt: null,
       scheduledAt: normalizeDate(payload.scheduledAt || payload.interviewTime),
+      durationMinutes: requestedInterviewDurationMinutes(payload.durationMinutes),
       interviewStatus: application.applicationStatus,
       resumeMarkdown: application.resumeMarkdown,
       roleMarkdown: application.roleMarkdown,
@@ -638,6 +749,10 @@ export class SqliteStore {
   getApplicationContext(id) {
     const application = this.getApplication(id);
     if (!application) return null;
+    const applicationArtifacts = this.listApplicationArtifacts(id);
+    const applicationArtifactPolicy = buildApplicationArtifactContextPolicy(
+      applicationArtifacts,
+    );
     const rounds = this.db
       .prepare(`
         SELECT * FROM interviews
@@ -657,13 +772,17 @@ export class SqliteStore {
         updatedAt: row.updated_at,
         sessionStartedAt: row.session_started_at || null,
         scheduledAt: row.scheduled_at || "",
+        durationMinutes: resolveInterviewDurationMinutes(row.duration_minutes),
         transcriptLineCount: this.db
           .prepare("SELECT COUNT(*) AS count FROM transcript_lines WHERE interview_id = ?")
           .get(row.id).count,
         artifacts: this.listArtifacts(row.id)
-          .filter((artifact) => APPLICATION_CONTEXT_ARTIFACT_KINDS.has(artifact.kind)),
+          .filter(
+            (artifact) =>
+              artifact.includeInCrossRoundContext &&
+              !isRoundArtifactShadowed(artifact, applicationArtifactPolicy),
+          ),
       }));
-    const applicationArtifacts = this.listApplicationArtifacts(id);
     return {
       ...application,
       rounds,
@@ -720,10 +839,12 @@ export class SqliteStore {
   patchApplication(id, patch = {}) {
     const current = this.getApplication(id);
     if (!current) return null;
-    const aliases = {
-      ...patch,
-      applicationStatus: patch.applicationStatus || patch.interviewStatus || patch.status,
-    };
+    const aliases = { ...patch };
+    const statusWasProvided = hasApplicationStatusField(patch);
+    if (statusWasProvided) {
+      aliases.applicationStatus = requestedApplicationStatus(patch);
+      assertWritableApplicationStatus(aliases.applicationStatus, current.applicationStatus);
+    }
     const merged = normalizeApplication({
       ...current,
       ...pick(aliases, [
@@ -763,7 +884,11 @@ export class SqliteStore {
     });
   }
 
-  upsertApplicationArtifact(applicationId, artifact) {
+  upsertApplicationArtifact(
+    applicationId,
+    artifact,
+    { allowLegacyContextFallback = false } = {},
+  ) {
     if (!this.getApplication(applicationId)) return null;
     const now = new Date().toISOString();
     const kind = cleanSlug(artifact?.kind, 80);
@@ -773,6 +898,13 @@ export class SqliteStore {
     const existing = this.db.prepare(`
       SELECT * FROM application_artifacts WHERE application_id = ? AND kind = ?
     `).get(applicationId, kind);
+    const includeInCrossRoundContext = resolveArtifactContextFlag({
+      artifact,
+      existing,
+      kind,
+      scope: "application",
+      allowLegacyContextFallback,
+    });
     const value = {
       id: existing?.id || cleanId(artifact?.id) || crypto.randomUUID(),
       applicationId,
@@ -781,18 +913,21 @@ export class SqliteStore {
       markdown,
       sourceHarness: cleanSlug(artifact?.sourceHarness, 40),
       sourceSessionId: cleanText(artifact?.sourceSessionId, 200),
+      includeInCrossRoundContext,
       createdAt: existing?.created_at || normalizeDate(artifact?.createdAt) || now,
       updatedAt: now,
     };
     this.db.prepare(`
       INSERT INTO application_artifacts
         (id, application_id, kind, title, markdown, source_harness,
-         source_session_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         source_session_id, include_in_cross_round_context, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(application_id, kind) DO UPDATE SET
         title=excluded.title, markdown=excluded.markdown,
         source_harness=excluded.source_harness,
-        source_session_id=excluded.source_session_id, updated_at=excluded.updated_at
+        source_session_id=excluded.source_session_id,
+        include_in_cross_round_context=excluded.include_in_cross_round_context,
+        updated_at=excluded.updated_at
     `).run(
       value.id,
       value.applicationId,
@@ -801,6 +936,7 @@ export class SqliteStore {
       value.markdown,
       value.sourceHarness,
       value.sourceSessionId,
+      value.includeInCrossRoundContext ? 1 : 0,
       value.createdAt,
       value.updatedAt,
     );
@@ -820,10 +956,13 @@ export class SqliteStore {
     const current = this.getInterviewContext(interviewId);
     if (!current) return "";
     const sections = [];
-    const applicationArtifacts = this.listApplicationArtifacts(current.applicationId);
-    for (const kind of ["process-brief", "application-handoff", "final-summary"]) {
-      const artifact = applicationArtifacts.find((item) => item.kind === kind);
-      if (artifact) sections.push(`## ${artifact.title}\n\n${artifact.markdown}`);
+    const allApplicationArtifacts = this.listApplicationArtifacts(current.applicationId);
+    const applicationArtifactPolicy = buildApplicationArtifactContextPolicy(
+      allApplicationArtifacts,
+    );
+    const applicationArtifacts = applicationArtifactPolicy.includedArtifacts;
+    for (const artifact of applicationArtifacts) {
+      sections.push(`## ${artifact.title}\n\n${artifact.markdown}`);
     }
     const priorRounds = this.db.prepare(`
       SELECT * FROM interviews
@@ -831,11 +970,13 @@ export class SqliteStore {
       ORDER BY round_order, created_at
     `).all(current.applicationId, current.roundOrder);
     for (const round of priorRounds) {
-      const artifacts = this.listArtifacts(round.id);
-      const artifact = artifacts.find((item) => item.kind === "round-handoff")
-        || artifacts.find((item) => item.kind === "interview-summary");
-      if (!artifact) continue;
-      sections.push(`## ${round.round_label || `第${round.round_order}轮`}交接\n\n${artifact.markdown}`);
+      const artifacts = this.listArtifacts(round.id)
+        .filter((artifact) => artifact.includeInCrossRoundContext);
+      for (const artifact of artifacts) {
+        if (isRoundArtifactShadowed(artifact, applicationArtifactPolicy)) continue;
+        const roundLabel = round.round_label || `第${round.round_order}轮`;
+        sections.push(`## ${roundLabel} · ${artifact.title}\n\n${artifact.markdown}`);
+      }
     }
     const safeMaxChars = Math.min(500000, Math.max(0, Number(maxChars) || 60000));
     return sections.join("\n\n").slice(0, safeMaxChars);
@@ -863,15 +1004,23 @@ export class SqliteStore {
     return row ? this.hydrateInterview(row, { includeLines: false }) : null;
   }
 
-  listInterviews({ query = "", status = "", limit = 50 } = {}) {
+  listInterviews({
+    query = "",
+    applicationStatus = "",
+    roundStatus = "",
+    status = "",
+    limit = 50,
+  } = {}) {
     const normalizedQuery = cleanText(query, 160).toLowerCase();
-    const normalizedStatus = cleanText(status, 24);
+    const normalizedApplicationStatus = cleanText(applicationStatus || status, 24);
+    const normalizedRoundStatus = cleanText(roundStatus, 24);
     const rows = this.db
       .prepare(`
         SELECT interviews.id, interviews.application_id, interviews.round_order,
           interviews.round_label, interviews.round_status, interviews.outcome,
           applications.name, applications.application_status AS interview_status,
           interviews.scheduled_at, interviews.session_started_at,
+          interviews.duration_minutes,
           interviews.created_at, interviews.updated_at,
           applications.jd_draft_name, applications.selected_jd_id,
           applications.role_short_name,
@@ -881,6 +1030,7 @@ export class SqliteStore {
         JOIN applications ON applications.id = interviews.application_id
         WHERE interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
           AND (? = '' OR applications.application_status = ?)
+          AND (? = '' OR interviews.round_status = ?)
           AND (? = '' OR LOWER(applications.name) LIKE '%' || ? || '%'
             OR LOWER(applications.jd_draft_name) LIKE '%' || ? || '%'
             OR LOWER(applications.role_short_name) LIKE '%' || ? || '%')
@@ -888,8 +1038,10 @@ export class SqliteStore {
         LIMIT ?
       `)
       .all(
-        normalizedStatus,
-        normalizedStatus,
+        normalizedApplicationStatus,
+        normalizedApplicationStatus,
+        normalizedRoundStatus,
+        normalizedRoundStatus,
         normalizedQuery,
         normalizedQuery,
         normalizedQuery,
@@ -904,9 +1056,11 @@ export class SqliteStore {
       roundStatus: row.round_status,
       outcome: row.outcome,
       name: row.name,
+      applicationStatus: row.interview_status,
       interviewStatus: row.interview_status,
       scheduledAt: row.scheduled_at || "",
       sessionStartedAt: row.session_started_at || null,
+      durationMinutes: resolveInterviewDurationMinutes(row.duration_minutes),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       roleName: row.jd_draft_name,
@@ -941,6 +1095,9 @@ export class SqliteStore {
   patchInterview(id, patch) {
     const current = this.getInterview(id);
     if (!current) return null;
+    if (Object.prototype.hasOwnProperty.call(patch || {}, "durationMinutes")) {
+      requestedInterviewDurationMinutes(patch.durationMinutes);
+    }
     const sharedPatch = pick(patch, [
       "name",
       "resumeMarkdown",
@@ -958,6 +1115,7 @@ export class SqliteStore {
       ...pick(patch, [
         "sessionStartedAt",
         "scheduledAt",
+        "durationMinutes",
         "roundOrder",
         "roundLabel",
         "roundStatus",
@@ -1214,7 +1372,16 @@ export class SqliteStore {
     return { value, color: normalizedColor };
   }
 
-  upsertArtifact(interviewId, artifact, { mirrorApplication = true } = {}) {
+  upsertArtifact(
+    interviewId,
+    artifact,
+    {
+      mirrorApplication = true,
+      allowLegacyContextFallback = false,
+      legacyRoundHandoffExists,
+      preserveTimestamps = false,
+    } = {},
+  ) {
     if (!this.getInterviewContext(interviewId)) return null;
     const now = new Date().toISOString();
     const kind = cleanSlug(artifact?.kind, 80);
@@ -1224,6 +1391,25 @@ export class SqliteStore {
     const existing = this.db
       .prepare("SELECT * FROM interview_artifacts WHERE interview_id = ? AND kind = ?")
       .get(interviewId, kind);
+    const hasExplicitContextFlag = Object.prototype.hasOwnProperty.call(
+      artifact || {},
+      "includeInCrossRoundContext",
+    );
+    const resolvedLegacyRoundHandoffExists =
+      typeof legacyRoundHandoffExists === "boolean"
+        ? legacyRoundHandoffExists
+        : Boolean(this.db.prepare(`
+          SELECT 1 FROM interview_artifacts
+          WHERE interview_id = ? AND kind = 'round-handoff'
+        `).get(interviewId));
+    const includeInCrossRoundContext = resolveArtifactContextFlag({
+      artifact,
+      existing,
+      kind,
+      scope: "round",
+      allowLegacyContextFallback,
+      legacyRoundHandoffExists: resolvedLegacyRoundHandoffExists,
+    });
     const value = {
       id: existing?.id || cleanId(artifact?.id) || crypto.randomUUID(),
       interviewId,
@@ -1232,16 +1418,21 @@ export class SqliteStore {
       markdown,
       sourceHarness: cleanSlug(artifact?.sourceHarness, 40),
       sourceSessionId: cleanText(artifact?.sourceSessionId, 200),
+      includeInCrossRoundContext,
       createdAt: existing?.created_at || normalizeDate(artifact?.createdAt) || now,
-      updatedAt: now,
+      updatedAt: preserveTimestamps
+        ? normalizeDate(artifact?.updatedAt) || now
+        : now,
     };
     this.db.prepare(`
       INSERT INTO interview_artifacts
-        (id, interview_id, kind, title, markdown, source_harness, source_session_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, interview_id, kind, title, markdown, source_harness, source_session_id,
+         include_in_cross_round_context, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(interview_id, kind) DO UPDATE SET
         title=excluded.title, markdown=excluded.markdown,
         source_harness=excluded.source_harness, source_session_id=excluded.source_session_id,
+        include_in_cross_round_context=excluded.include_in_cross_round_context,
         updated_at=excluded.updated_at
     `).run(
       value.id,
@@ -1251,22 +1442,33 @@ export class SqliteStore {
       value.markdown,
       value.sourceHarness,
       value.sourceSessionId,
+      value.includeInCrossRoundContext ? 1 : 0,
       value.createdAt,
       value.updatedAt,
     );
     this.db.prepare("UPDATE interviews SET updated_at = ? WHERE id = ?").run(now, interviewId);
-    if (mirrorApplication && APPLICATION_ARTIFACT_COMPAT_KINDS.has(kind)) {
+    if (kind === "round-handoff" && !hasExplicitContextFlag) {
+      this.db.prepare(`
+        UPDATE interview_artifacts SET include_in_cross_round_context = 0
+        WHERE interview_id = ? AND kind = 'interview-summary'
+      `).run(interviewId);
+    }
+    if (mirrorApplication && LEGACY_MIRRORED_APPLICATION_ARTIFACT_KINDS.has(kind)) {
       const applicationId = this.db
         .prepare("SELECT application_id FROM interviews WHERE id = ?")
         .get(interviewId)?.application_id;
       if (applicationId) {
-        this.upsertApplicationArtifact(applicationId, {
+        const mirroredArtifact = {
           kind,
           title: value.title,
           markdown: value.markdown,
           sourceHarness: value.sourceHarness,
           sourceSessionId: value.sourceSessionId,
-        });
+          ...(hasExplicitContextFlag
+            ? { includeInCrossRoundContext: value.includeInCrossRoundContext }
+            : {}),
+        };
+        this.upsertApplicationArtifact(applicationId, mirroredArtifact);
       }
     }
     return this.listArtifacts(interviewId).find((item) => item.kind === kind);
@@ -1576,6 +1778,7 @@ export class SqliteStore {
       updatedAt: row.updated_at,
       sessionStartedAt: row.session_started_at || null,
       scheduledAt: row.scheduled_at || "",
+      durationMinutes: resolveInterviewDurationMinutes(row.duration_minutes),
       interviewStatus: application.applicationStatus,
       applicationStatus: application.applicationStatus,
       resumeMarkdown: application.resumeMarkdown,
@@ -1596,7 +1799,14 @@ export class SqliteStore {
     };
   }
 
-  upsertInterviewSnapshot(interview, { mirrorApplicationArtifacts = true } = {}) {
+  upsertInterviewSnapshot(
+    interview,
+    {
+      mirrorApplicationArtifacts = true,
+      allowLegacyArtifactContextFallback = false,
+      preserveArtifactTimestamps = false,
+    } = {},
+  ) {
     const applicationId = cleanId(interview?.applicationId) || cleanId(interview?.id) || crypto.randomUUID();
     let applicationRow = this.db.prepare("SELECT * FROM applications WHERE id = ?").get(applicationId);
     if (!applicationRow) {
@@ -1633,11 +1843,16 @@ export class SqliteStore {
     this.replaceQuestions(normalized.id, normalized.askedQuestions);
     this.replaceArtifacts(normalized.id, normalized.artifacts, {
       mirrorApplication: mirrorApplicationArtifacts,
+      allowLegacyContextFallback: allowLegacyArtifactContextFallback,
+      preserveTimestamps: preserveArtifactTimestamps,
     });
     this.replaceHarnessSessions(normalized.id, normalized.harnessSessions);
   }
 
-  upsertApplicationSnapshot(application) {
+  upsertApplicationSnapshot(
+    application,
+    { allowLegacyArtifactContextFallback = false } = {},
+  ) {
     const normalized = normalizeApplication(application);
     this.upsertApplicationRow(normalized);
     this.addStatus(normalized.applicationStatus);
@@ -1646,6 +1861,7 @@ export class SqliteStore {
       Array.isArray(application?.applicationArtifacts)
         ? application.applicationArtifacts
         : Array.isArray(application?.artifacts) ? application.artifacts : [],
+      { allowLegacyContextFallback: allowLegacyArtifactContextFallback },
     );
     return normalized;
   }
@@ -1705,16 +1921,18 @@ export class SqliteStore {
       INSERT INTO interviews
         (id, application_id, round_order, round_label, round_status, outcome, round_focus,
          name, created_at, updated_at, session_started_at, scheduled_at,
+         duration_minutes,
          interview_status, resume_markdown, role_markdown, resume_notes_json,
          selected_jd_id, jd_draft_name, role_short_name,
          last_processed_line_count, speaker_labels_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         application_id=excluded.application_id, round_order=excluded.round_order,
         round_label=excluded.round_label, round_status=excluded.round_status,
         outcome=excluded.outcome, round_focus=excluded.round_focus,
         name=excluded.name, updated_at=excluded.updated_at,
         session_started_at=excluded.session_started_at, scheduled_at=excluded.scheduled_at,
+        duration_minutes=excluded.duration_minutes,
         interview_status=excluded.interview_status, resume_markdown=excluded.resume_markdown,
         role_markdown=excluded.role_markdown, resume_notes_json=excluded.resume_notes_json,
         selected_jd_id=excluded.selected_jd_id, jd_draft_name=excluded.jd_draft_name,
@@ -1734,6 +1952,7 @@ export class SqliteStore {
       value.updatedAt,
       value.sessionStartedAt || null,
       value.scheduledAt || null,
+      value.durationMinutes,
       value.interviewStatus,
       value.resumeMarkdown,
       value.roleMarkdown,
@@ -1800,16 +2019,40 @@ export class SqliteStore {
     });
   }
 
-  replaceArtifacts(interviewId, artifacts, { mirrorApplication = true } = {}) {
+  replaceArtifacts(
+    interviewId,
+    artifacts,
+    {
+      mirrorApplication = true,
+      allowLegacyContextFallback = false,
+      preserveTimestamps = false,
+    } = {},
+  ) {
     this.db.prepare("DELETE FROM interview_artifacts WHERE interview_id = ?").run(interviewId);
+    const legacyRoundHandoffExists = artifacts.some(
+      (artifact) => cleanSlug(artifact?.kind, 80) === "round-handoff",
+    );
     for (const artifact of artifacts) {
-      this.upsertArtifact(interviewId, artifact, { mirrorApplication });
+      this.upsertArtifact(interviewId, artifact, {
+        mirrorApplication,
+        allowLegacyContextFallback,
+        legacyRoundHandoffExists,
+        preserveTimestamps,
+      });
     }
   }
 
-  replaceApplicationArtifacts(applicationId, artifacts) {
+  replaceApplicationArtifacts(
+    applicationId,
+    artifacts,
+    { allowLegacyContextFallback = false } = {},
+  ) {
     this.db.prepare("DELETE FROM application_artifacts WHERE application_id = ?").run(applicationId);
-    for (const artifact of artifacts) this.upsertApplicationArtifact(applicationId, artifact);
+    for (const artifact of artifacts) {
+      this.upsertApplicationArtifact(applicationId, artifact, {
+        allowLegacyContextFallback,
+      });
+    }
   }
 
   replaceHarnessSessions(interviewId, sessions) {
@@ -1858,7 +2101,7 @@ function normalizeApplication(application) {
     applicationStatus: cleanText(
       application?.applicationStatus || application?.interviewStatus || application?.status,
       24,
-    ) || "未面",
+    ) || DEFAULT_APPLICATION_STATUS,
     resumeMarkdown: cleanText(application?.resumeMarkdown || application?.resumeAnalysis, 500000),
     roleMarkdown: cleanText(application?.roleMarkdown || application?.jdMarkdown, 500000),
     resumeNotes: Array.isArray(application?.resumeNotes) ? application.resumeNotes : [],
@@ -1866,6 +2109,38 @@ function normalizeApplication(application) {
     jdDraftName: cleanText(application?.jdDraftName || application?.jdName, 300),
     roleShortName: cleanText(application?.roleShortName, 40),
   };
+}
+
+function hasApplicationStatusField(value) {
+  return ["applicationStatus", "interviewStatus", "status"].some(
+    (key) => Object.prototype.hasOwnProperty.call(value || {}, key),
+  );
+}
+
+function requestedApplicationStatus(value) {
+  if (!hasApplicationStatusField(value)) return undefined;
+  return value.applicationStatus || value.interviewStatus || value.status || "";
+}
+
+function assertWritableApplicationStatus(value, currentStatus) {
+  if (value === undefined) return;
+  if (typeof value !== "string" || !normalizeStatusLabel(value)) {
+    const error = new Error("应聘流程状态必须是非空文本");
+    error.code = "INVALID_APPLICATION_STATUS";
+    throw error;
+  }
+  if (!isRetiredApplicationStatus(value)) return;
+  if (
+    currentStatus !== undefined &&
+    normalizeStatusLabel(value) === normalizeStatusLabel(currentStatus)
+  ) {
+    return;
+  }
+  const error = new Error(
+    "旧版或轮次状态不能写入应聘流程；请改填轮次状态或本轮结果",
+  );
+  error.code = "RETIRED_APPLICATION_STATUS";
+  throw error;
 }
 
 function normalizeInterview(interview) {
@@ -1884,7 +2159,8 @@ function normalizeInterview(interview) {
     updatedAt: normalizeDate(interview?.updatedAt) || now,
     sessionStartedAt: normalizeDate(interview?.sessionStartedAt),
     scheduledAt: normalizeDate(interview?.scheduledAt),
-    interviewStatus: cleanText(interview?.interviewStatus, 24) || inferStatus(interview),
+    durationMinutes: requestedInterviewDurationMinutes(interview?.durationMinutes),
+    interviewStatus: cleanText(interview?.interviewStatus, 24) || DEFAULT_APPLICATION_STATUS,
     resumeMarkdown: cleanText(interview?.resumeMarkdown, 500000),
     roleMarkdown: cleanText(interview?.roleMarkdown, 500000),
     resumeNotes: Array.isArray(interview?.resumeNotes) ? interview.resumeNotes : [],
@@ -1931,10 +2207,17 @@ function sharedFieldsForInterview(application) {
   };
 }
 
-function normalizeStatuses(options, interviews) {
+function normalizeStatuses(options, applications, interviews) {
   const result = [];
   const seen = new Set();
-  for (const value of [...DEFAULT_STATUSES, ...(Array.isArray(options) ? options : []), ...(Array.isArray(interviews) ? interviews.map((item) => item.interviewStatus) : [])]) {
+  for (const value of [
+    ...DEFAULT_STATUSES,
+    ...(Array.isArray(options) ? options : []),
+    ...(Array.isArray(applications)
+      ? applications.map((item) => item.applicationStatus || item.interviewStatus)
+      : []),
+    ...(Array.isArray(interviews) ? interviews.map((item) => item.interviewStatus) : []),
+  ]) {
     const status = cleanText(value, 24);
     if (status && !seen.has(status)) {
       seen.add(status);
@@ -1942,6 +2225,75 @@ function normalizeStatuses(options, interviews) {
     }
   }
   return result;
+}
+
+function requestedInterviewDurationMinutes(value) {
+  if (value === undefined) {
+    return DEFAULT_INTERVIEW_DURATION_MINUTES;
+  }
+  if (!isValidInterviewDurationMinutes(value)) {
+    throw new Error(
+      `面试时长必须是 ${MIN_INTERVIEW_DURATION_MINUTES}–${MAX_INTERVIEW_DURATION_MINUTES} 之间的整数分钟`,
+    );
+  }
+  return value;
+}
+
+function resolveArtifactContextFlag({
+  artifact,
+  existing,
+  kind,
+  scope,
+  allowLegacyContextFallback,
+  legacyRoundHandoffExists = false,
+}) {
+  if (Object.prototype.hasOwnProperty.call(artifact || {}, "includeInCrossRoundContext")) {
+    if (typeof artifact.includeInCrossRoundContext !== "boolean") {
+      throw new Error("includeInCrossRoundContext must be a boolean");
+    }
+    return artifact.includeInCrossRoundContext;
+  }
+  if (existing) return Boolean(existing.include_in_cross_round_context);
+  if (LEGACY_KNOWN_ARTIFACT_KINDS.has(kind)) {
+    if (scope === "application") return LEGACY_APPLICATION_CONTEXT_KINDS.has(kind);
+    if (kind === "round-handoff") return true;
+    if (kind === "interview-summary") return !legacyRoundHandoffExists;
+    return false;
+  }
+  if (allowLegacyContextFallback) return false;
+  throw new Error("新产物类型必须明确设置 includeInCrossRoundContext");
+}
+
+function artifactContentSignature(artifact) {
+  return JSON.stringify([
+    artifact.kind,
+    artifact.title,
+    artifact.markdown,
+    artifact.sourceHarness,
+    artifact.sourceSessionId,
+  ]);
+}
+
+function buildApplicationArtifactContextPolicy(artifacts) {
+  const includedArtifacts = artifacts.filter(
+    (artifact) => artifact.includeInCrossRoundContext,
+  );
+  return {
+    includedArtifacts,
+    authoritativeKinds: new Set(
+      artifacts
+        .filter((artifact) => LEGACY_MIRRORED_APPLICATION_ARTIFACT_KINDS.has(artifact.kind))
+        .map((artifact) => artifact.kind),
+    ),
+    includedSignatures: new Set(includedArtifacts.map(artifactContentSignature)),
+  };
+}
+
+function isRoundArtifactShadowed(artifact, applicationPolicy) {
+  return (
+    applicationPolicy.authoritativeKinds.has(artifact.kind) ||
+    applicationPolicy.includedSignatures.has(artifactContentSignature(artifact))
+  );
 }
 
 function mapLine(row) {
@@ -2038,6 +2390,7 @@ function mapArtifact(row) {
     markdown: row.markdown,
     sourceHarness: row.source_harness,
     sourceSessionId: row.source_session_id,
+    includeInCrossRoundContext: Boolean(row.include_in_cross_round_context),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2052,6 +2405,7 @@ function mapApplicationArtifact(row) {
     markdown: row.markdown,
     sourceHarness: row.source_harness,
     sourceSessionId: row.source_session_id,
+    includeInCrossRoundContext: Boolean(row.include_in_cross_round_context),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2146,12 +2500,6 @@ function normalizeDate(value) {
 
 function finiteOrNull(value) {
   return Number.isFinite(Number(value)) ? Number(value) : null;
-}
-
-function inferStatus(interview) {
-  return interview?.lines?.length || interview?.cards?.length || interview?.sessionStartedAt
-    ? "已面待定"
-    : "未面";
 }
 
 function parseJson(value, fallback) {

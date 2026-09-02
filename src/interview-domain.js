@@ -1,6 +1,48 @@
+export const DEFAULT_APPLICATION_STATUS = "招聘中";
+export const APPLICATION_STATUS_PRESETS = [
+  { value: "招聘中", color: "blue" },
+  { value: "通过", color: "green" },
+  { value: "未通过", color: "red" },
+  { value: "放弃/归档", color: "red" },
+];
+export const ROUND_STATUS_OPTIONS = ["待安排", "已安排", "进行中", "已结束", "已取消"];
+const RETIRED_APPLICATION_STATUSES = new Set([
+  "未面",
+  "面试中",
+  "已面待定",
+  ...ROUND_STATUS_OPTIONS,
+]);
+export const DEFAULT_INTERVIEW_DURATION_MINUTES = 60;
+export const MIN_INTERVIEW_DURATION_MINUTES = 1;
+export const MAX_INTERVIEW_DURATION_MINUTES = 24 * 60;
+
+export function isValidInterviewDurationMinutes(value) {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_INTERVIEW_DURATION_MINUTES &&
+    value <= MAX_INTERVIEW_DURATION_MINUTES
+  );
+}
+
+export function resolveInterviewDurationMinutes(
+  value,
+  fallback = DEFAULT_INTERVIEW_DURATION_MINUTES,
+) {
+  if (isValidInterviewDurationMinutes(value)) return value;
+  return isValidInterviewDurationMinutes(fallback)
+    ? fallback
+    : DEFAULT_INTERVIEW_DURATION_MINUTES;
+}
+
 export function normalizeStatusLabel(value) {
   if (typeof value !== "string") return "";
   return value.trim().replace(/\s+/g, " ").slice(0, 24);
+}
+
+export function isRetiredApplicationStatus(value) {
+  const status = normalizeStatusLabel(value);
+  return RETIRED_APPLICATION_STATUSES.has(status) || /面(?:通过|未通过|待定)$/u.test(status);
 }
 
 export const STATUS_COLOR_OPTIONS = [
@@ -22,8 +64,7 @@ const STATUS_COLOR_TONES = {
 };
 
 const DEFAULT_STATUS_COLORS = {
-  招聘中: "blue",
-  通过: "green",
+  ...Object.fromEntries(APPLICATION_STATUS_PRESETS.map(({ value, color }) => [value, color])),
   未面: "gray",
   待安排: "gray",
   已安排: "amber",
@@ -33,8 +74,6 @@ const DEFAULT_STATUS_COLORS = {
   已取消: "red",
   已面待定: "gray",
   一面通过: "green",
-  未通过: "red",
-  "放弃/归档": "red",
 };
 
 export function normalizeStatusColor(value) {
@@ -43,15 +82,6 @@ export function normalizeStatusColor(value) {
 
 export function statusColorFor(status, statusColors = {}) {
   return normalizeStatusColor(statusColors?.[status]) || DEFAULT_STATUS_COLORS[status] || "gray";
-}
-
-export function inferInterviewStatus(interview) {
-  return interview?.lines?.length ||
-    interview?.transcriptLineCount ||
-    interview?.cards?.length ||
-    interview?.sessionStartedAt
-    ? "已面待定"
-    : "未面";
 }
 
 export function inferRoundStatus(interview) {
@@ -143,6 +173,10 @@ export function getInterviewRoleLabel(interview) {
 
 export function interviewStatusTone(status, statusColors = {}) {
   return STATUS_COLOR_TONES[statusColorFor(status, statusColors)] || "neutral";
+}
+
+export function roundStatusTone(status) {
+  return interviewStatusTone(status);
 }
 
 export function compareInterviews(left, right, sortBy) {

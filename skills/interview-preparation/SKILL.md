@@ -11,7 +11,7 @@ Prepare an interview plan, not another resume screen. The goal is to reveal whet
 
 1. Find the hiring process with `list_applications`, matching candidate and role together, then load `get_application_context`. Select the exact Round and load it with `get_interview_context`. If several Applications or Rounds remain plausible, do not guess.
 2. Read the Application-level JD, resume evidence, and `resume-screening`. Use the target Round's label, schedule, focus, notes, and existing artifacts as the current boundary.
-3. For a later Round, use selected prior `round-handoff` and `interview-summary` artifacts. Carry forward only confirmed evidence, unresolved risks, contradictions, and next-round objectives. Do not read every earlier raw transcript unless a decision-changing fact cannot be resolved from the curated artifacts.
+3. For a later Round, use the prior artifacts exposed in `get_application_context`; the workbench selects them through each artifact's explicit `includeInCrossRoundContext` value, not its `kind`. Carry forward only confirmed evidence, unresolved risks, contradictions, and next-round objectives. Do not read every earlier raw transcript unless a decision-changing fact cannot be resolved from the curated artifacts.
 4. Choose the two or three points that can still change the hiring decision. Avoid re-testing evidence already established in an earlier Round.
 5. Build a short interview path. Each section should state what it verifies, the main question, necessary follow-ups, and pass/risk signals.
 6. Include important JD areas that still have no evidence, but do not turn the accumulated gap list into a full re-interview.
@@ -42,4 +42,4 @@ Write in the user's language and keep it usable during a live interview:
 **Pass and risk signals**: ...
 ```
 
-When a target Round exists, save the final Markdown there with `save_interview_artifact`, kind `interview-preparation`, and title `Interview preparation`. Do not save Round preparation on the Application, copy it to another Round, or change hiring status.
+When a target Round exists, save the final Markdown there with `save_interview_artifact`, kind `interview-preparation`, title `Interview preparation`, and `includeInCrossRoundContext: false`. Do not save Round preparation on the Application, copy it to another Round, or change hiring status.

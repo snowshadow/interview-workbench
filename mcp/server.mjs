@@ -3,10 +3,20 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
+import {
+  DEFAULT_INTERVIEW_DURATION_MINUTES,
+  MAX_INTERVIEW_DURATION_MINUTES,
+  MIN_INTERVIEW_DURATION_MINUTES,
+  isRetiredApplicationStatus,
+} from "../src/interview-domain.js";
 import { readAllowedResumeFile } from "./resume-path.js";
 
 const baseUrl = String(process.env.WORKBENCH_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const accessToken = String(process.env.WORKBENCH_ACCESS_TOKEN || "").trim();
+const writableApplicationStatusSchema = z.string().min(1).max(24).refine(
+  (status) => !isRetiredApplicationStatus(status),
+  { message: "Legacy and round statuses cannot be written as an application status" },
+);
 
 const server = new McpServer({
   name: "interview-workbench",
@@ -40,7 +50,9 @@ server.registerTool("list_interviews", {
   description: "Find individual interview rounds without loading resumes or transcripts.",
   inputSchema: {
     query: z.string().max(160).optional().describe("Candidate or role name search"),
-    status: z.string().max(24).optional().describe("Exact interview status"),
+    applicationStatus: z.string().max(24).optional().describe("Exact parent application hiring status"),
+    roundStatus: z.string().max(24).optional().describe("Exact round lifecycle status"),
+    status: z.string().max(24).optional().describe("Deprecated alias for applicationStatus"),
     limit: z.number().int().min(1).max(200).default(50),
   },
   annotations: { readOnlyHint: true, openWorldHint: false },
@@ -77,8 +89,13 @@ server.registerTool("create_interview", {
   description: "Create a candidate application and its first interview round through the backwards-compatible interview endpoint, optionally attach a local PDF/DOC/DOCX resume, and link the current AI session to that round.",
   inputSchema: {
     name: z.string().min(1).max(160).describe("Candidate or interview name"),
-    interviewStatus: z.string().max(24).default("未面"),
+    applicationStatus: writableApplicationStatusSchema.optional().describe("Application hiring status; omitted for the workbench default"),
+    interviewStatus: writableApplicationStatusSchema.optional().describe("Deprecated alias for applicationStatus"),
     scheduledAt: z.string().optional().describe("ISO 8601 date-time"),
+    durationMinutes: z.number().int()
+      .min(MIN_INTERVIEW_DURATION_MINUTES)
+      .max(MAX_INTERVIEW_DURATION_MINUTES)
+      .default(DEFAULT_INTERVIEW_DURATION_MINUTES),
     roleMarkdown: z.string().max(500000).optional().describe("Job description in Markdown"),
     resumeMarkdown: z.string().max(500000).optional().describe("Resume screening or interview preparation Markdown"),
     roleName: z.string().max(300).optional(),
@@ -93,8 +110,10 @@ server.registerTool("create_interview", {
     method: "POST",
     body: {
       name: input.name,
+      applicationStatus: input.applicationStatus,
       interviewStatus: input.interviewStatus,
       scheduledAt: input.scheduledAt,
+      durationMinutes: input.durationMinutes,
       roleMarkdown: input.roleMarkdown,
       resumeMarkdown: input.resumeMarkdown,
       jdDraftName: input.roleName,
@@ -121,6 +140,10 @@ server.registerTool("create_interview_round", {
     applicationId: z.string().min(1).max(160),
     roundLabel: z.string().min(1).max(80).describe("Round name, for example 一面、二面 or 终面"),
     scheduledAt: z.string().optional().describe("ISO 8601 date-time"),
+    durationMinutes: z.number().int()
+      .min(MIN_INTERVIEW_DURATION_MINUTES)
+      .max(MAX_INTERVIEW_DURATION_MINUTES)
+      .default(DEFAULT_INTERVIEW_DURATION_MINUTES),
     roundFocus: z.string().max(10000).optional().describe("Goals and unresolved items for this round"),
     roundStatus: z.string().max(24).optional().describe("Round lifecycle status; omitted to let the workbench infer it from scheduledAt"),
   },
@@ -144,6 +167,7 @@ server.registerTool("save_application_artifact", {
     kind: z.string().regex(/^[a-z0-9._-]+$/).max(80),
     title: z.string().max(200).optional(),
     markdown: z.string().min(1).max(1000000),
+    includeInCrossRoundContext: z.boolean().optional().describe("Whether this artifact should be included automatically in later rounds; required for a new custom kind"),
     harness: z.string().max(40).optional(),
     sessionId: z.string().max(200).optional(),
   },
@@ -157,6 +181,7 @@ server.registerTool("save_application_artifact", {
       body: {
         title: input.title,
         markdown: input.markdown,
+        includeInCrossRoundContext: input.includeInCrossRoundContext,
         sourceHarness: session?.harness || "",
         sourceSessionId: session?.sessionId || "",
       },
@@ -172,6 +197,7 @@ server.registerTool("save_interview_artifact", {
     kind: z.string().regex(/^[a-z0-9._-]+$/).max(80),
     title: z.string().max(200).optional(),
     markdown: z.string().min(1).max(1000000),
+    includeInCrossRoundContext: z.boolean().optional().describe("Whether this artifact should be included automatically in later rounds; required for a new custom kind"),
     harness: z.string().max(40).optional(),
     sessionId: z.string().max(200).optional(),
   },
@@ -185,6 +211,7 @@ server.registerTool("save_interview_artifact", {
       body: {
         title: input.title,
         markdown: input.markdown,
+        includeInCrossRoundContext: input.includeInCrossRoundContext,
         sourceHarness: session?.harness || "",
         sourceSessionId: session?.sessionId || "",
       },
@@ -215,7 +242,7 @@ server.registerTool("update_application_status", {
   description: "Update the hiring status of a candidate application only after the user has explicitly chosen or approved it.",
   inputSchema: {
     applicationId: z.string().min(1).max(160),
-    applicationStatus: z.string().min(1).max(24),
+    applicationStatus: writableApplicationStatusSchema,
   },
   annotations: { destructiveHint: false, openWorldHint: false },
 }, async ({ applicationId, applicationStatus }) => toolResult(
@@ -225,12 +252,38 @@ server.registerTool("update_application_status", {
   }),
 ));
 
-server.registerTool("update_interview_status", {
-  title: "Update application status by interview",
-  description: "Backwards-compatible tool: update the parent application's hiring status through an interview-round ID and the legacy interviewStatus field. It does not manage the round lifecycle.",
+server.registerTool("update_interview_round", {
+  title: "Update interview round",
+  description: "Update round-owned schedule, duration, lifecycle, focus, or outcome without changing the parent application's hiring status.",
   inputSchema: {
     interviewId: z.string().min(1).max(160),
-    interviewStatus: z.string().min(1).max(24),
+    scheduledAt: z.string().optional().describe("ISO 8601 date-time"),
+    durationMinutes: z.number().int()
+      .min(MIN_INTERVIEW_DURATION_MINUTES)
+      .max(MAX_INTERVIEW_DURATION_MINUTES)
+      .optional(),
+    roundStatus: z.string().max(24).optional(),
+    outcome: z.string().max(80).optional(),
+    roundFocus: z.string().max(500000).optional(),
+  },
+  annotations: { destructiveHint: false, openWorldHint: false },
+}, async ({ interviewId, ...patch }) => {
+  const body = Object.fromEntries(
+    Object.entries(patch).filter(([, value]) => value !== undefined),
+  );
+  if (!Object.keys(body).length) throw new Error("At least one round field is required");
+  return toolResult(await request(`/api/interviews/${encodeURIComponent(interviewId)}`, {
+    method: "PATCH",
+    body,
+  }));
+});
+
+server.registerTool("update_interview_status", {
+  title: "Update application status by interview",
+  description: "Deprecated compatibility tool: update the parent application's hiring status through an interview-round ID. Use update_interview_round for round lifecycle and outcome.",
+  inputSchema: {
+    interviewId: z.string().min(1).max(160),
+    interviewStatus: writableApplicationStatusSchema,
   },
   annotations: { destructiveHint: false, openWorldHint: false },
 }, async ({ interviewId, interviewStatus }) => toolResult(
@@ -335,6 +388,7 @@ function interviewRoundToolSummary(interview) {
     roundFocus: interview.roundFocus,
     roleShortName: interview.roleShortName,
     scheduledAt: interview.scheduledAt,
+    durationMinutes: interview.durationMinutes,
     createdAt: interview.createdAt,
     updatedAt: interview.updatedAt,
   };

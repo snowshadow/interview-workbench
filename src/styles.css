@@ -552,6 +552,14 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
   overflow: auto;
 }
 
+.status-picker-group-label {
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 650;
+}
+
 .status-picker-popover .session-status {
   width: 100%;
   min-height: 26px;
@@ -2770,7 +2778,7 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
 }
 
 .form-grid-round {
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
 }
 
 .round-fields,
@@ -3049,7 +3057,8 @@ button.status-picker-trigger.purple:hover:not(:disabled) {
 
   .form-grid-basic,
   .form-grid-jd,
-  .form-grid-role {
+  .form-grid-role,
+  .form-grid-round {
     grid-template-columns: 1fr;
   }
 

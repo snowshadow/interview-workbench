@@ -152,6 +152,7 @@ test("full export and import preserve attachment bytes", () => {
     source.createInterview(sampleInterview({
       jdDraftName: "量化策略研究负责人",
       roleShortName: "量化",
+      durationMinutes: 90,
     }));
     const bytes = Buffer.from("%PDF-1.4\nbackup roundtrip");
     source.saveAttachment("candidate-1", {
@@ -164,6 +165,7 @@ test("full export and import preserve attachment bytes", () => {
     const imported = target.getInterview("candidate-1");
     const attachment = target.getAttachment(imported.resumeFile.id);
     assert.equal(imported.roleShortName, "量化");
+    assert.equal(imported.durationMinutes, 90);
     assert.equal(target.getApplication(imported.applicationId).roleShortName, "量化");
     assert.deepEqual(fs.readFileSync(attachment.absolutePath), bytes);
   } finally {
@@ -228,6 +230,7 @@ test("interview artifacts and harness sessions persist and survive export", () =
       kind: "interview-summary",
       title: "Post-interview report",
       markdown: "# Summary\n\nProceed.",
+      includeInCrossRoundContext: true,
       sourceHarness: "codex",
       sourceSessionId: "thread-1",
     });
@@ -244,6 +247,7 @@ test("interview artifacts and harness sessions persist and survive export", () =
     source.upsertApplicationArtifact("candidate-1", {
       kind: "resume-screening",
       markdown: "更新后的流程级筛选结论",
+      includeInCrossRoundContext: false,
     });
     const session = source.linkHarnessSession("candidate-1", {
       harness: "codex",
@@ -256,17 +260,29 @@ test("interview artifacts and harness sessions persist and survive export", () =
       .find((artifact) => artifact.kind === "interview-summary");
     assert.equal(summary.id, first.id);
     assert.match(summary.markdown, /Do not proceed/);
+    assert.equal(summary.includeInCrossRoundContext, true);
     assert.equal(session.isPrimary, true);
     assert.equal(source.getInterviewContext("candidate-1").lines, undefined);
 
     target.importBackup(source.exportStore());
     const imported = target.getInterview("candidate-1");
     assert.ok(imported.artifacts.some((artifact) => artifact.kind === "interview-summary"));
+    assert.equal(
+      imported.artifacts.find((artifact) => artifact.kind === "interview-summary")
+        ?.includeInCrossRoundContext,
+      true,
+    );
     assert.equal(imported.harnessSessions[0].sessionId, "thread-1");
     assert.equal(
       target.getApplicationContext("candidate-1").applicationArtifacts
         .find((artifact) => artifact.kind === "resume-screening")?.markdown,
       "更新后的流程级筛选结论",
+    );
+    assert.equal(
+      target.getApplicationContext("candidate-1").applicationArtifacts
+        .find((artifact) => artifact.kind === "resume-screening")
+        ?.includeInCrossRoundContext,
+      false,
     );
   } finally {
     source.close();
@@ -281,9 +297,17 @@ test("interview listing and transcript pagination avoid loading the full transcr
   const store = new SqliteStore(config, silentLogger);
   try {
     store.createInterview(sampleInterview());
-    const matches = store.listInterviews({ query: "示例", status: "已安排" });
+    const matches = store.listInterviews({
+      query: "示例",
+      applicationStatus: "招聘中",
+      roundStatus: "已结束",
+    });
     assert.equal(matches.length, 1);
+    assert.equal(matches[0].applicationStatus, "招聘中");
+    assert.equal(matches[0].roundStatus, "已结束");
     assert.equal(matches[0].transcriptLineCount, 2);
+    assert.equal(store.listInterviews({ roundStatus: "已取消" }).length, 0);
+    assert.equal(store.listInterviews({ status: "招聘中" }).length, 1);
 
     const firstPage = store.getTranscriptChunk("candidate-1", { offset: 0, limit: 1 });
     assert.equal(firstPage.lines.length, 1);
@@ -402,17 +426,18 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     const application = store.createApplication({
       id: "application-1",
       name: "同一位候选人",
-      applicationStatus: "已安排",
       resumeMarkdown: "# 原简历分析",
       roleMarkdown: "# Agent JD",
       selectedJdId: "jd-quant",
       jdDraftName: "量化策略研究负责人",
       roleShortName: "量化",
-      firstRound: { id: "round-1", roundLabel: "技术一面" },
+      firstRound: { id: "round-1", roundLabel: "技术一面", durationMinutes: 90 },
     });
     assert.equal(application.rounds.length, 1);
     assert.equal(application.rounds[0].applicationId, "application-1");
+    assert.equal(application.applicationStatus, "招聘中");
     assert.equal(store.getInterview("round-1").roleShortName, "量化");
+    assert.equal(application.rounds[0].durationMinutes, 90);
     assert.equal(application.rounds[0].roundStatus, "待安排");
     store.upsertJd({
       id: "jd-quant",
@@ -431,6 +456,7 @@ test("applications own shared fields while rounds keep independent lifecycle dat
       id: "round-2",
       roundLabel: "业务二面",
       scheduledAt: "2026-08-08T02:00:00.000Z",
+      durationMinutes: 45,
       roundFocus: "验证跨轮风险",
       roundOrder: 99,
       outcome: "调用方不得预填",
@@ -451,6 +477,7 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     assert.equal(secondRound.roundOrder, 2);
     assert.equal(secondRound.roleShortName, "量化");
     assert.equal(secondRound.roundStatus, "已安排");
+    assert.equal(secondRound.durationMinutes, 45);
     assert.equal(secondRound.outcome, "");
     assert.equal(secondRound.sessionStartedAt, null);
     assert.deepEqual(secondRound.lines, []);
@@ -467,7 +494,7 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     );
     assert.equal(store.getInterview("round-1").roundLabel, "技术一面");
 
-    const applicationSummary = store.listApplications({ query: "同一位", status: "已安排" })[0];
+    const applicationSummary = store.listApplications({ query: "同一位", status: "招聘中" })[0];
     assert.equal(applicationSummary.id, "application-1");
     assert.equal(applicationSummary.roundCount, 2);
     assert.equal("resumeMarkdown" in applicationSummary, false);
@@ -488,12 +515,15 @@ test("applications own shared fields while rounds keep independent lifecycle dat
       roleMarkdown: "# 更新后的共享 JD",
       roleShortName: "研究",
       outcome: "通过",
+      durationMinutes: 75,
     });
     assert.equal(store.getApplication("application-1").roleMarkdown, "# 更新后的共享 JD");
     assert.equal(store.getApplication("application-1").roleShortName, "研究");
     assert.equal(store.getInterview("round-1").roleMarkdown, "# 更新后的共享 JD");
     assert.equal(store.getInterview("round-1").roleShortName, "研究");
+    assert.equal(store.getInterview("round-1").durationMinutes, 90);
     assert.equal(store.getInterview("round-2").outcome, "通过");
+    assert.equal(store.getInterview("round-2").durationMinutes, 75);
 
     const pdf = Buffer.from("%PDF-1.4\nshared resume");
     const resume = store.saveAttachment("round-1", {
@@ -505,11 +535,15 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     assert.equal(store.getApplication("application-1").resumeFile.id, resume.id);
 
     const snapshot = store.getStore();
-    assert.equal(snapshot.schemaVersion, 6);
+    assert.equal(snapshot.schemaVersion, 7);
     assert.equal(snapshot.applications.length, 1);
     assert.equal(snapshot.interviews.length, 2);
     const exported = store.exportStore();
     assert.equal(exported.applications[0].roleShortName, "研究");
+    assert.deepEqual(
+      Object.fromEntries(exported.interviews.map((round) => [round.id, round.durationMinutes])),
+      { "round-1": 90, "round-2": 75 },
+    );
     assert.equal(exported.jdLibrary[0].shortName, "策略库");
     assert.match(exported.applications[0].resumeFile.dataUrl, /^data:application\/pdf;base64,/);
     assert.equal(exported.interviews.some((round) => round.resumeFile?.dataUrl), false);
@@ -519,7 +553,43 @@ test("applications own shared fields while rounds keep independent lifecycle dat
   }
 });
 
-test("cross-round context uses only curated application and prior-round artifacts", () => {
+test("round duration rejects invalid create and update values", () => {
+  const config = createTestConfig("interview-duration-validation-");
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    for (const durationMinutes of [0, -1, 60.5, 1441, "invalid", null, "", true]) {
+      assert.throws(
+        () => store.createInterview(sampleInterview({
+          id: `invalid-${String(durationMinutes)}`,
+          durationMinutes,
+        })),
+        /面试时长必须是/,
+      );
+    }
+    store.createInterview(sampleInterview({ id: "valid-round", durationMinutes: 60 }));
+    for (const durationMinutes of [0, -1, 60.5, 1441, "invalid", null, "", true]) {
+      assert.throws(
+        () => store.patchInterview("valid-round", { durationMinutes }),
+        /面试时长必须是/,
+      );
+    }
+    assert.equal(store.getInterview("valid-round").durationMinutes, 60);
+    assert.throws(
+      () => store.importBackup({
+        schemaVersion: 7,
+        applications: [],
+        interviews: [sampleInterview({ id: "invalid-import", durationMinutes: 0 })],
+      }),
+      /面试时长必须是/,
+    );
+    assert.equal(store.getInterview("valid-round").durationMinutes, 60);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("cross-round context follows artifact metadata instead of kind whitelists", () => {
   const config = createTestConfig();
   const store = new SqliteStore(config, silentLogger);
   try {
@@ -541,18 +611,48 @@ test("cross-round context uses only curated application and prior-round artifact
     store.upsertApplicationArtifact("application-1", {
       kind: "process-brief",
       markdown: "共享流程摘要",
+      includeInCrossRoundContext: true,
+    });
+    store.upsertApplicationArtifact("application-1", {
+      kind: "private-note",
+      markdown: "不应自动注入的流程私密备注",
+      includeInCrossRoundContext: false,
     });
     store.upsertArtifact("round-1", {
       kind: "round-handoff",
       markdown: "一面待验证风险",
+      includeInCrossRoundContext: true,
     });
     store.upsertArtifact("round-1", {
       kind: "interview-preparation",
       markdown: "不应作为跨轮摘要返回的准备稿",
+      includeInCrossRoundContext: false,
     });
     store.upsertArtifact("round-1", {
       kind: "resume-screening",
       markdown: "旧客户端保存的共享筛选结论",
+      includeInCrossRoundContext: false,
+    });
+    store.upsertArtifact("round-1", {
+      kind: "decision-note",
+      markdown: "自定义类型也应进入跨轮上下文",
+      includeInCrossRoundContext: true,
+    });
+    store.upsertArtifact("round-1", {
+      kind: "private-detail",
+      markdown: "自定义类型可明确排除",
+      includeInCrossRoundContext: false,
+    });
+    assert.throws(
+      () => store.upsertArtifact("round-1", {
+        kind: "unknown-without-policy",
+        markdown: "不能静默猜测",
+      }),
+      /必须明确设置 includeInCrossRoundContext/,
+    );
+    store.upsertArtifact("round-1", {
+      kind: "decision-note",
+      markdown: "更新后的自定义类型仍应进入跨轮上下文",
     });
     store.linkHarnessSession("round-1", {
       harness: "codex",
@@ -562,11 +662,17 @@ test("cross-round context uses only curated application and prior-round artifact
     store.upsertArtifact("round-2", {
       kind: "interview-summary",
       markdown: "当前轮总结不应注入自身上下文",
+      includeInCrossRoundContext: true,
     });
 
     const context = store.getCrossRoundContext("round-2");
     assert.match(context, /共享流程摘要/);
     assert.match(context, /一面待验证风险/);
+    assert.match(context, /更新后的自定义类型仍应进入跨轮上下文/);
+    assert.doesNotMatch(context, /不应自动注入的流程私密备注/);
+    assert.doesNotMatch(context, /不应作为跨轮摘要返回的准备稿/);
+    assert.doesNotMatch(context, /旧客户端保存的共享筛选结论/);
+    assert.doesNotMatch(context, /自定义类型可明确排除/);
     assert.doesNotMatch(context, /不应注入的原始转录/);
     assert.doesNotMatch(context, /当前轮总结不应注入自身上下文/);
     assert.equal(store.getCrossRoundContext("round-2", 12).length, 12);
@@ -579,7 +685,15 @@ test("cross-round context uses only curated application and prior-round artifact
     assert.deepEqual(applicationContext.rounds.map((round) => round.id), ["round-1", "round-2"]);
     const firstRoundContext = applicationContext.rounds[0];
     assert.equal(firstRoundContext.transcriptLineCount, 1);
-    assert.deepEqual(firstRoundContext.artifacts.map((artifact) => artifact.kind), ["round-handoff"]);
+    assert.deepEqual(
+      new Set(firstRoundContext.artifacts.map((artifact) => artifact.kind)),
+      new Set(["round-handoff", "decision-note"]),
+    );
+    assert.equal(
+      firstRoundContext.artifacts.find((artifact) => artifact.kind === "decision-note")
+        ?.includeInCrossRoundContext,
+      true,
+    );
     for (const privateField of [
       "lines",
       "cards",
@@ -593,6 +707,156 @@ test("cross-round context uses only curated application and prior-round artifact
     }
   } finally {
     store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("new custom artifacts must declare their cross-round policy", () => {
+  const config = createTestConfig("interview-artifact-policy-");
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    assert.throws(
+      () => store.createApplication({
+        id: "application-round-artifact",
+        name: "候选人 A",
+        firstRound: {
+          id: "round-artifact",
+          artifacts: [{ kind: "custom-note", markdown: "不得静默遗漏" }],
+        },
+      }),
+      /必须明确设置 includeInCrossRoundContext/,
+    );
+    assert.equal(store.getApplication("application-round-artifact"), null);
+    assert.equal(store.getInterview("round-artifact"), null);
+
+    assert.throws(
+      () => store.createApplication({
+        id: "application-level-artifact",
+        name: "候选人 B",
+        firstRound: { id: "application-level-round" },
+        applicationArtifacts: [{ kind: "custom-brief", markdown: "不得静默遗漏" }],
+      }),
+      /必须明确设置 includeInCrossRoundContext/,
+    );
+    assert.equal(store.getApplication("application-level-artifact"), null);
+    assert.equal(store.getInterview("application-level-round"), null);
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("schema v7 import preserves explicit artifact exclusion during legacy promotion", () => {
+  const sourceConfig = createTestConfig("interview-artifact-v7-source-");
+  const targetConfig = createTestConfig("interview-artifact-v7-target-");
+  const source = new SqliteStore(sourceConfig, silentLogger);
+  const target = new SqliteStore(targetConfig, silentLogger);
+  try {
+    source.createApplication({
+      id: "application-1",
+      name: "候选人",
+      firstRound: { id: "round-1" },
+    });
+    source.createInterviewRound("application-1", { id: "round-2", roundLabel: "二面" });
+    source.upsertArtifact("round-1", {
+      kind: "process-brief",
+      markdown: "明确排除的流程材料",
+      includeInCrossRoundContext: false,
+    });
+    const backup = source.exportStore();
+    backup.applications[0].applicationArtifacts = [];
+    backup.applications[0].artifacts = [];
+
+    target.importBackup(backup);
+    const promoted = target.getApplicationContext("application-1").applicationArtifacts
+      .find((artifact) => artifact.kind === "process-brief");
+    assert.equal(promoted.includeInCrossRoundContext, false);
+    assert.doesNotMatch(target.getCrossRoundContext("round-2"), /明确排除的流程材料/);
+  } finally {
+    source.close();
+    target.close();
+    cleanupTestConfig(sourceConfig);
+    cleanupTestConfig(targetConfig);
+  }
+});
+
+test("schema v7 restart preserves an explicit flag when rebuilding a missing mirror", () => {
+  const config = createTestConfig("interview-artifact-v7-restart-");
+  const initial = new SqliteStore(config, silentLogger);
+  initial.createApplication({
+    id: "application-1",
+    name: "候选人",
+    firstRound: { id: "round-1" },
+  });
+  initial.createInterviewRound("application-1", { id: "round-2", roundLabel: "二面" });
+  initial.upsertArtifact("round-1", {
+    kind: "process-brief",
+    markdown: "重启后仍应排除",
+    includeInCrossRoundContext: false,
+  });
+  initial.close();
+
+  const interrupted = new DatabaseSync(config.databaseFile);
+  interrupted.prepare(`
+    DELETE FROM application_artifacts
+    WHERE application_id = ? AND kind = 'process-brief'
+  `).run("application-1");
+  interrupted.close();
+
+  const reopened = new SqliteStore(config, silentLogger);
+  try {
+    const promoted = reopened.getApplicationContext("application-1").applicationArtifacts
+      .find((artifact) => artifact.kind === "process-brief");
+    assert.equal(promoted.includeInCrossRoundContext, false);
+    assert.doesNotMatch(reopened.getCrossRoundContext("round-2"), /重启后仍应排除/);
+  } finally {
+    reopened.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("artifact policy migration is retryable and fail-closed", () => {
+  const config = createTestConfig("interview-artifact-migration-retry-");
+  const initial = new SqliteStore(config, silentLogger);
+  initial.createInterview(sampleInterview({ id: "round-1" }));
+  initial.upsertArtifact("round-1", {
+    kind: "interview-summary",
+    markdown: "详细总结",
+    includeInCrossRoundContext: true,
+  });
+  initial.upsertArtifact("round-1", {
+    kind: "round-handoff",
+    markdown: "精简交接",
+    includeInCrossRoundContext: true,
+  });
+  initial.upsertArtifact("round-1", {
+    kind: "interview-preparation",
+    markdown: "准备稿",
+    includeInCrossRoundContext: false,
+  });
+  initial.close();
+
+  const interrupted = new DatabaseSync(config.databaseFile);
+  interrupted.exec(`
+    UPDATE meta SET value = '6' WHERE key = 'schema_version';
+    DELETE FROM meta WHERE key = 'artifact_context_policy_v7';
+    UPDATE interview_artifacts SET include_in_cross_round_context = 1;
+  `);
+  interrupted.close();
+
+  const migrated = new SqliteStore(config, silentLogger);
+  try {
+    const policies = Object.fromEntries(
+      migrated.listArtifacts("round-1")
+        .map((artifact) => [artifact.kind, artifact.includeInCrossRoundContext]),
+    );
+    assert.deepEqual(policies, {
+      "interview-summary": false,
+      "round-handoff": true,
+      "interview-preparation": false,
+    });
+  } finally {
+    migrated.close();
     cleanupTestConfig(config);
   }
 });
@@ -688,12 +952,13 @@ test("schema v5 migration adds empty role short names without inferring them", (
   const migrated = new SqliteStore(config, silentLogger);
   try {
     const snapshot = migrated.getStore();
-    assert.equal(snapshot.schemaVersion, 6);
+    assert.equal(snapshot.schemaVersion, 7);
     assert.equal(snapshot.jdLibrary[0].name, "量化策略研究负责人");
     assert.equal(snapshot.jdLibrary[0].shortName, "");
     assert.equal(snapshot.applications[0].jdDraftName, "量化策略研究负责人");
     assert.equal(snapshot.applications[0].roleShortName, "");
     assert.equal(snapshot.interviews[0].roleShortName, "");
+    assert.equal(snapshot.interviews[0].durationMinutes, 60);
   } finally {
     migrated.close();
   }
@@ -758,7 +1023,7 @@ test("schema v4 migration backs up once and never merges same-name interviews", 
   const store = new SqliteStore(config, silentLogger);
   try {
     const snapshot = store.getStore();
-    assert.equal(snapshot.schemaVersion, 6);
+    assert.equal(snapshot.schemaVersion, 7);
     assert.deepEqual(snapshot.applications.map((application) => application.id).sort(), ["legacy-1", "legacy-2"]);
     assert.equal(store.getApplicationContext("legacy-1").rounds[0].id, "legacy-1");
     assert.equal(store.getApplicationContext("legacy-2").rounds[0].id, "legacy-2");
@@ -767,8 +1032,21 @@ test("schema v4 migration backs up once and never merges same-name interviews", 
         .find((artifact) => artifact.kind === "resume-screening")?.markdown,
       "旧版共享筛选结论",
     );
+    assert.equal(
+      store.getApplicationContext("legacy-1").applicationArtifacts
+        .find((artifact) => artifact.kind === "resume-screening")
+        ?.includeInCrossRoundContext,
+      false,
+    );
+    assert.equal(
+      store.getInterview("legacy-1").artifacts
+        .find((artifact) => artifact.kind === "resume-screening")
+        ?.includeInCrossRoundContext,
+      false,
+    );
+    assert.equal(store.getInterview("legacy-1").durationMinutes, 60);
     const backups = fs.readdirSync(config.backupDir)
-      .filter((name) => name.startsWith("workbench-pre-v6-") && name.endsWith(".sqlite"));
+      .filter((name) => name.startsWith("workbench-pre-v7-") && name.endsWith(".sqlite"));
     assert.equal(backups.length, 1);
     assert.ok(fs.statSync(path.join(config.backupDir, backups[0])).size > 0);
   } finally {
