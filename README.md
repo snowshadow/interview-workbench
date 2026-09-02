@@ -18,19 +18,72 @@
 </p>
 
 <p align="center">
+  <a href="#工作台界面">工作台界面</a> ·
+  <a href="#ai-native-工作流">AI Native 工作流</a> ·
   <a href="#功能">功能</a> ·
   <a href="#快速开始">快速开始</a> ·
-  <a href="#ai-编程助手联动">AI 编程助手</a> ·
   <a href="#安全与隐私">安全与隐私</a>
 </p>
 
 面试工作台把浏览器采集的麦克风和会议声音发送给流式语音识别服务，在本机按应聘流程保存共享资料和多轮面试记录。面试官可以随时提交当前轮次的最新转录，让大模型生成简短的**犀利追问**和**查漏提醒**。
 
-![面试工作台界面](docs/assets/interview-workbench-macos.webp)
+## 工作台界面
 
-工作台也可以通过 MCP 与 Codex、Claude Code、WorkBuddy 等 AI 编程助手联动：AI 读取本地应聘流程和指定轮次，完成简历筛选、面试准备、新增轮次和面试总结，再把单轮或跨轮 Markdown 产物写回工作台，面试结束后不需要手动导出转录。
+简历、页面备注、AI 追问与实时转录位于同一个面试工作区。日历用于查看面试安排，流程库用于在候选人、岗位、状态和轮次之间切换。
 
-![智能面试工作闭环手绘图](docs/assets/interview-lifecycle.webp)
+<a href="docs/assets/interview-workbench-macos.webp">
+  <img src="docs/assets/interview-workbench-macos.webp" alt="面试工作台主界面：简历、备注、AI 追问与实时转录" width="100%">
+</a>
+
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/interview-calendar.webp"><img src="docs/assets/interview-calendar.webp" alt="面试日历界面" width="100%"></a><br>
+      <strong>日历</strong><br>
+      <sub>按周或按月查看多轮面试安排</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/interview-process-library.webp"><img src="docs/assets/interview-process-library.webp" alt="面试流程库界面" width="100%"></a><br>
+      <strong>流程库</strong><br>
+      <sub>按岗位、状态和更新时间管理应聘流程</sub>
+    </td>
+  </tr>
+</table>
+
+## AI Native 工作流
+
+工作台保存结构化的应聘流程、面试轮次和产物，Agent Skill 固化可复用的招聘方法，Codex、Claude Code、WorkBuddy 等 AI 编程助手负责执行。三者通过 MCP 连接，AI 读取同一份本地上下文，并把结果写回对应流程，不需要在聊天窗口和业务系统之间手动搬运。
+
+![AI 编程助手通过 MCP 参与完整面试流程](docs/assets/interview-lifecycle.webp)
+
+一次完整使用通常包含四步：
+
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/codex-resume-screening.webp"><img src="docs/assets/codex-resume-screening.webp" alt="Codex 执行简历筛选 Skill" width="100%"></a><br>
+      <strong>1. 简历筛选</strong><br>
+      <sub>读取 JD 与简历，给出推进判断</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/codex-interview-preparation.webp"><img src="docs/assets/codex-interview-preparation.webp" alt="Codex 执行面试准备 Skill" width="100%"></a><br>
+      <strong>2. 面试准备</strong><br>
+      <sub>结合筛选结果与本轮目标生成面试提纲</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/codex-create-interview.webp"><img src="docs/assets/codex-create-interview.webp" alt="Codex 执行创建面试场次 Skill" width="100%"></a><br>
+      <strong>3. 创建场次</strong><br>
+      <sub>复用已有材料和产物，创建并回读面试轮次</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/codex-interview-summary.webp"><img src="docs/assets/codex-interview-summary.webp" alt="Codex 执行面试总结 Skill" width="100%"></a><br>
+      <strong>4. 面试总结</strong><br>
+      <sub>读取转录，保存结论、完整 Q&amp;A 与跨轮交接</sub>
+    </td>
+  </tr>
+</table>
 
 ## 功能
 
