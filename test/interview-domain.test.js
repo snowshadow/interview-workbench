@@ -1,18 +1,64 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  APPLICATION_STATUS_PRESETS,
+  DEFAULT_APPLICATION_STATUS,
+  DEFAULT_INTERVIEW_DURATION_MINUTES,
+  MAX_INTERVIEW_DURATION_MINUTES,
+  MIN_INTERVIEW_DURATION_MINUTES,
   compareInterviews,
   getInterviewRole,
   getInterviewRoleLabel,
-  inferInterviewStatus,
   interviewStatusTone,
+  isRetiredApplicationStatus,
+  isValidInterviewDurationMinutes,
+  resolveInterviewDurationMinutes,
+  roundStatusTone,
 } from "../src/interview-domain.js";
 
 test("interview domain defaults stay independent from UI components", () => {
-  assert.equal(inferInterviewStatus({ lines: [] }), "未面");
-  assert.equal(inferInterviewStatus({ lines: [{ text: "hello" }] }), "已面待定");
   assert.equal(getInterviewRole({}), "未设置岗位");
   assert.equal(interviewStatusTone("自定义状态"), "neutral");
+});
+
+test("application and duration defaults have one domain-level source", () => {
+  assert.equal(DEFAULT_APPLICATION_STATUS, "招聘中");
+  assert.deepEqual(
+    APPLICATION_STATUS_PRESETS.map(({ value }) => value),
+    ["招聘中", "通过", "未通过", "放弃/归档"],
+  );
+  assert.equal(DEFAULT_INTERVIEW_DURATION_MINUTES, 60);
+  assert.equal(isValidInterviewDurationMinutes(MIN_INTERVIEW_DURATION_MINUTES), true);
+  assert.equal(isValidInterviewDurationMinutes(MAX_INTERVIEW_DURATION_MINUTES), true);
+  assert.equal(isValidInterviewDurationMinutes(0), false);
+  assert.equal(isValidInterviewDurationMinutes(60.5), false);
+  assert.equal(isValidInterviewDurationMinutes(true), false);
+  assert.equal(resolveInterviewDurationMinutes(90), 90);
+  assert.equal(resolveInterviewDurationMinutes(undefined), 60);
+  assert.equal(resolveInterviewDurationMinutes("invalid", 45), 45);
+  assert.equal(roundStatusTone("已安排"), "scheduled");
+  assert.equal(interviewStatusTone("已安排", { 已安排: "purple" }), "purple");
+});
+
+test("retired application statuses remain readable but cannot be written again", () => {
+  for (const status of [
+    "未面",
+    "面试中",
+    "已面待定",
+    "待安排",
+    "已安排",
+    "进行中",
+    "已结束",
+    "已取消",
+    "一面通过",
+    "二面未通过",
+    "终面待定",
+  ]) {
+    assert.equal(isRetiredApplicationStatus(status), true, status);
+  }
+  for (const status of ["招聘中", "通过", "未通过", "放弃/归档", "offer 审批中", ""]) {
+    assert.equal(isRetiredApplicationStatus(status), false, status);
+  }
 });
 
 test("calendar role labels come from interview data without inferring job semantics", () => {

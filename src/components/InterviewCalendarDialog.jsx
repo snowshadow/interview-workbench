@@ -12,6 +12,7 @@ import {
   localDayKey,
   monthCalendarDays,
   sameLocalDay,
+  scheduledInterviewEndDate,
   scheduledInterviews,
   startOfLocalDay,
   startOfLocalWeek,
@@ -20,9 +21,10 @@ import {
   getInterviewRole,
   getInterviewRoleLabel,
   inferRoundStatus,
-  interviewStatusTone,
+  resolveInterviewDurationMinutes,
   roundDisplayName,
   roundLabelFor,
+  roundStatusTone,
 } from "../interview-domain.js";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -32,7 +34,6 @@ export function InterviewCalendarDialog({
   interviews,
   onClose,
   onSync,
-  statusColors,
 }) {
   const [view, setView] = useState("week");
   const [anchorDate, setAnchorDate] = useState(() => startOfLocalDay(new Date()));
@@ -183,7 +184,6 @@ export function InterviewCalendarDialog({
             entries={entries}
             onSelect={selectInterview}
             selectedId={selectedId}
-            statusColors={statusColors}
           />
         ) : (
           <MonthCalendar
@@ -191,7 +191,6 @@ export function InterviewCalendarDialog({
             entries={entries}
             onSelect={selectInterview}
             selectedId={selectedId}
-            statusColors={statusColors}
           />
         )}
 
@@ -203,7 +202,6 @@ export function InterviewCalendarDialog({
               setSyncState(null);
             }}
             onSync={syncSelectedInterview}
-            statusColors={statusColors}
             syncState={syncState}
           />
         ) : null}
@@ -217,7 +215,6 @@ function WeekCalendar({
   entries,
   onSelect,
   selectedId,
-  statusColors,
 }) {
   const today = new Date();
   const weekStart = startOfLocalWeek(anchorDate);
@@ -225,10 +222,14 @@ function WeekCalendar({
   const weekEnd = addLocalDays(weekStart, 7);
   const visibleEntries = entries.filter(({ date }) => date >= weekStart && date < weekEnd);
   const eventHours = visibleEntries.map(({ date }) => date.getHours() + date.getMinutes() / 60);
+  const eventEndHours = visibleEntries.map(({ interview, date }) =>
+    date.getHours() + date.getMinutes() / 60 +
+      resolveInterviewDurationMinutes(interview.durationMinutes) / 60,
+  );
   const startHour = Math.max(0, Math.min(8, ...eventHours.map(Math.floor)));
   const endHour = Math.min(
     24,
-    Math.max(20, ...eventHours.map((hour) => Math.ceil(hour + 1))),
+    Math.max(20, ...eventEndHours.map(Math.ceil)),
   );
   const hourCount = endHour - startHour;
 
@@ -271,15 +272,26 @@ function WeekCalendar({
                   {dayEntries.map(({ interview, date }) => {
                     const minutesFromStart =
                       (date.getHours() - startHour) * 60 + date.getMinutes();
+                    const durationMinutes = resolveInterviewDurationMinutes(
+                      interview.durationMinutes,
+                    );
+                    const remainingDayMinutes =
+                      (24 - date.getHours()) * 60 - date.getMinutes();
+                    const visibleDurationMinutes = Math.min(
+                      durationMinutes,
+                      remainingDayMinutes,
+                    );
                     return (
                       <CalendarEventButton
                         interview={interview}
                         isSelected={interview.id === selectedId}
                         key={interview.id}
                         onClick={() => onSelect(interview.id)}
-                        statusColors={statusColors}
                         style={{
-                          height: `${HOUR_HEIGHT - 5}px`,
+                          height: `${Math.max(
+                            26,
+                            (visibleDurationMinutes / 60) * HOUR_HEIGHT - 5,
+                          )}px`,
                           top: `${(minutesFromStart / 60) * HOUR_HEIGHT + 2}px`,
                         }}
                       />
@@ -307,7 +319,6 @@ function MonthCalendar({
   entries,
   onSelect,
   selectedId,
-  statusColors,
 }) {
   const today = new Date();
   const days = monthCalendarDays(anchorDate);
@@ -347,7 +358,6 @@ function MonthCalendar({
                     isSelected={interview.id === selectedId}
                     key={interview.id}
                     onClick={() => onSelect(interview.id)}
-                    statusColors={statusColors}
                     time={formatTime(date)}
                   />
                 ))}
@@ -368,7 +378,6 @@ function CalendarEventButton({
   interview,
   isSelected,
   onClick,
-  statusColors,
   style,
   time,
 }) {
@@ -380,7 +389,7 @@ function CalendarEventButton({
       aria-label={`${formatTime(new Date(interview.scheduledAt))} ${displayName} ${roleLabel}`}
       className={`calendar-event ${compact ? "compact" : ""} ${
         isSelected ? "selected" : ""
-      } tone-${interviewStatusTone(status, statusColors)}`}
+      } tone-${roundStatusTone(status)}`}
       onClick={onClick}
       style={style}
       title={`${displayName} · ${getInterviewRole(interview)}`}
@@ -407,16 +416,18 @@ function CalendarEventButton({
   );
 }
 
-function EventInspector({ entry, onClose, onSync, statusColors, syncState }) {
+function EventInspector({ entry, onClose, onSync, syncState }) {
   const { interview, date } = entry;
   const status = inferRoundStatus(interview);
   const syncing = syncState?.status === "syncing";
+  const durationMinutes = resolveInterviewDurationMinutes(interview.durationMinutes);
+  const endDate = entry.endDate || scheduledInterviewEndDate(interview);
 
   return (
     <aside className="calendar-event-inspector" aria-label="面试详情">
       <div className="calendar-inspector-head">
         <div>
-          <span className={`session-status ${interviewStatusTone(status, statusColors)}`}>
+          <span className={`session-status ${roundStatusTone(status)}`}>
             {status}
           </span>
           <h3>{interview.name || "未命名候选人"} · {roundLabelFor(interview)}</h3>
@@ -434,7 +445,7 @@ function EventInspector({ entry, onClose, onSync, statusColors, syncState }) {
       <p className="calendar-inspector-role">{getInterviewRole(interview)}</p>
       <p className="calendar-inspector-time">
         <Clock3 size={15} />
-        {formatFullDateTime(date)} – {formatTime(new Date(date.getTime() + 60 * 60 * 1000))}
+        {formatFullDateTime(date)} – {formatTime(endDate)}
       </p>
       <button
         className="primary calendar-sync-button"
@@ -454,7 +465,9 @@ function EventInspector({ entry, onClose, onSync, statusColors, syncState }) {
           {syncState.message}
         </p>
       ) : (
-        <p className="calendar-sync-hint">将以一小时日程打开，由系统日历确认添加。</p>
+        <p className="calendar-sync-hint">
+          将以 {durationMinutes} 分钟日程打开，由系统日历确认添加。
+        </p>
       )}
     </aside>
   );

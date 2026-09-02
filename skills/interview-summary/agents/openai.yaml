@@ -1,6 +1,6 @@
 interface:
-  display_name: "Interview Summary"
-  short_description: "Summarize one round and prepare its handoff"
-  default_prompt: "Use $interview-summary to review the exact round, save its report and four-part handoff, and keep final conclusions at application level."
+  display_name: "Interview Summary & Q&A"
+  short_description: "Generate a decision, full Q&A, and round handoff"
+  default_prompt: "Use $interview-summary to review the exact round with separate decision and Q&A tracks, save the hiring report, chronological Interview Q&A, and four-part handoff, then return direct document links."
 policy:
   allow_implicit_invocation: true

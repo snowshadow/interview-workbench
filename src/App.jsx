@@ -42,11 +42,20 @@ import {
 } from "./components/dialogs/ProviderSettingsDialog.jsx";
 import { ResumeDocument } from "./components/resume/ResumeDocument.jsx";
 import {
+  APPLICATION_STATUS_PRESETS,
+  DEFAULT_APPLICATION_STATUS,
+  DEFAULT_INTERVIEW_DURATION_MINUTES,
+  MAX_INTERVIEW_DURATION_MINUTES,
+  MIN_INTERVIEW_DURATION_MINUTES,
+  ROUND_STATUS_OPTIONS,
   formatShortDateTime,
   inferRoundStatus,
   interviewStatusTone,
+  isRetiredApplicationStatus,
+  isValidInterviewDurationMinutes,
   normalizeStatusLabel,
   roundLabelFor,
+  roundStatusTone,
   roundsForApplication,
   STATUS_COLOR_OPTIONS,
   statusColorFor,
@@ -68,7 +77,6 @@ import {
 } from "./audio-capture.js";
 import {
   DEFAULT_INTERVIEW_STATUSES,
-  DEFAULT_ROUND_STATUSES,
   STORE_KEY,
   applicationMetadataPatch,
   clearLegacyInterviewStore,
@@ -130,6 +138,7 @@ const EMPTY_INTERVIEW = {
   applicationId: "",
   name: "",
   scheduledAt: "",
+  durationMinutes: DEFAULT_INTERVIEW_DURATION_MINUTES,
   sessionStartedAt: null,
   roundOrder: 1,
   roundLabel: "",
@@ -148,6 +157,8 @@ const EMPTY_INTERVIEW = {
   lastProcessedLineCount: 0,
   speakerLabels: {},
 };
+const APPLICATION_STATUS_PRESET_VALUES = APPLICATION_STATUS_PRESETS.map(({ value }) => value);
+const RETIRED_APPLICATION_STATUS_ERROR = "该状态属于旧版或面试轮次，不能作为应聘流程状态";
 
 function App() {
   const [store, setStore] = useState(loadInterviewStore);
@@ -246,6 +257,7 @@ function App() {
     roundStatus,
     outcome,
     roundFocus,
+    durationMinutes,
     lines,
     cards,
     askedQuestions,
@@ -253,7 +265,9 @@ function App() {
     speakerLabels,
   } = activeInterview;
   const interviewStatus =
-    activeApplication.applicationStatus || activeInterview.interviewStatus || "招聘中";
+    activeApplication.applicationStatus ||
+    activeInterview.interviewStatus ||
+    DEFAULT_APPLICATION_STATUS;
   const resumeNotes = Array.isArray(savedResumeNotes) ? savedResumeNotes : [];
 
   useEffect(() => {
@@ -568,6 +582,11 @@ function App() {
   function applyActiveApplicationStatus(value, { keepPickerOpen = false } = {}) {
     const nextStatus = normalizeStatusLabel(value);
     if (!nextStatus) return;
+    if (isRetiredApplicationStatus(nextStatus)) {
+      setError(RETIRED_APPLICATION_STATUS_ERROR);
+      return;
+    }
+    setError("");
     setStore((prev) => {
       const updatedAt = new Date().toISOString();
       return {
@@ -678,7 +697,7 @@ function App() {
         sourceApplication?.name === "未命名候选人"
           ? ""
           : sourceApplication?.name || "",
-      applicationStatus: sourceApplication?.applicationStatus || "招聘中",
+      applicationStatus: sourceApplication?.applicationStatus || DEFAULT_APPLICATION_STATUS,
       selectedJdId: sourceApplication?.selectedJdId || "",
       jdDraftName: sourceApplication?.jdDraftName || "",
       roleShortName: sourceApplication?.roleShortName || "",
@@ -695,6 +714,8 @@ function App() {
       outcome: sourceRound?.outcome || "",
       roundFocus: sourceRound?.roundFocus || "",
       scheduledAt: toDatetimeLocalValue(sourceRound?.scheduledAt),
+      durationMinutes:
+        sourceRound?.durationMinutes || DEFAULT_INTERVIEW_DURATION_MINUTES,
     });
   }
 
@@ -779,6 +800,13 @@ function App() {
       setError("请填写轮次名称");
       return;
     }
+    const durationMinutesValue = Number(interviewForm.durationMinutes);
+    if (!isValidInterviewDurationMinutes(durationMinutesValue)) {
+      setError(
+        `面试时长必须是 ${MIN_INTERVIEW_DURATION_MINUTES}–${MAX_INTERVIEW_DURATION_MINUTES} 之间的整数分钟`,
+      );
+      return;
+    }
     setError("");
     interviewFormSubmitLockRef.current = true;
     setInterviewFormSubmitting(true);
@@ -786,6 +814,7 @@ function App() {
       const scheduledAtValue = fromDatetimeLocalValue(interviewForm.scheduledAt);
       const roundPatch = {
         scheduledAt: fromDatetimeLocalValue(interviewForm.scheduledAt),
+        durationMinutes: durationMinutesValue,
         roundLabel: roundLabelValue,
         roundStatus:
           interviewForm.mode === "edit-round"
@@ -817,6 +846,13 @@ function App() {
         if (!name) throw new Error("请填写候选人姓名");
         const applicationStatusValue = normalizeStatusLabel(interviewForm.applicationStatus);
         if (!applicationStatusValue) throw new Error("请填写应聘流程状态");
+        const keepsExistingRetiredStatus =
+          interviewForm.mode === "edit-application" &&
+          isRetiredApplicationStatus(applicationStatusValue) &&
+          applicationStatusValue === normalizeStatusLabel(activeApplication.applicationStatus);
+        if (isRetiredApplicationStatus(applicationStatusValue) && !keepsExistingRetiredStatus) {
+          throw new Error(RETIRED_APPLICATION_STATUS_ERROR);
+        }
         const roleMarkdownValue = interviewForm.roleMarkdown.trim();
         const roleShortNameValue = interviewForm.roleShortName.trim();
         const jdName =
@@ -844,7 +880,7 @@ function App() {
 
         const applicationPatch = {
           name,
-          applicationStatus: applicationStatusValue,
+          ...(keepsExistingRetiredStatus ? {} : { applicationStatus: applicationStatusValue }),
           selectedJdId: nextJdId,
           jdDraftName: jdName,
           roleShortName: roleShortNameValue,
@@ -1580,12 +1616,13 @@ function App() {
     const content = [
       `# ${interviewName || "面试记录"}`,
       "",
-      `应聘流程状态：${interviewStatus || "招聘中"}`,
+      `应聘流程状态：${interviewStatus || DEFAULT_APPLICATION_STATUS}`,
       `面试轮次：${roundLabelFor(activeInterview)}`,
       `轮次状态：${roundStatus || inferRoundStatus(activeInterview)}`,
       `本轮结果：${outcome || "未填写"}`,
       `本轮重点：${roundFocus || "未填写"}`,
       `计划面试时间：${formatDateTime(scheduledAt) || "未设置"}`,
+      `计划面试时长：${durationMinutes} 分钟`,
       `开始时间：${sessionStartedAt ? new Date(sessionStartedAt).toLocaleString() : "未开始"}`,
       "",
       "## 岗位能力要求",
@@ -1794,12 +1831,12 @@ function App() {
                 onClick={() => setStatusPickerOpen((open) => !open)}
                 title="修改应聘流程状态"
               >
-                {interviewStatus || "未面"}
+                {interviewStatus || DEFAULT_APPLICATION_STATUS}
               </button>
               {statusPickerOpen ? (
                 <div className="status-picker-popover">
                   <div className="status-picker-options">
-                    {statusOptions.map((statusOption) => (
+                    {APPLICATION_STATUS_PRESET_VALUES.map((statusOption) => (
                       <button
                         className={`session-status ${interviewStatusTone(
                           statusOption,
@@ -1814,6 +1851,13 @@ function App() {
                         {statusOption}
                       </button>
                     ))}
+                    {!APPLICATION_STATUS_PRESET_VALUES.includes(interviewStatus) ? (
+                      <span className="status-picker-group-label">
+                        {isRetiredApplicationStatus(interviewStatus)
+                          ? `当前历史状态：${interviewStatus}（仅保留显示）`
+                          : `当前自定义状态：${interviewStatus}`}
+                      </span>
+                    ) : null}
                   </div>
                   <form
                     className="status-picker-custom"
@@ -1823,14 +1867,14 @@ function App() {
                     }}
                   >
                     <input
-                      aria-label="自定义面试状态"
+                      aria-label="自定义流程状态"
                       maxLength={24}
                       onChange={(event) => setCustomStatusDraft(event.target.value)}
                       placeholder="自定义状态"
                       value={customStatusDraft}
                     />
                     <button
-                      aria-label="添加自定义状态"
+                      aria-label="添加自定义流程状态"
                       className="icon-button"
                       disabled={!customStatusDraft.trim()}
                       title="添加并使用"
@@ -2022,7 +2066,6 @@ function App() {
         onAdd={() => openInterviewForm("create-round")}
         onSelect={switchInterview}
         rounds={activeRounds}
-        statusColors={store.statusColors}
       /> : <section className="empty-workbench" role="status">
         <div>
           <h2>{storeReady ? "还没有面试流程" : "正在读取面试流程"}</h2>
@@ -2107,7 +2150,6 @@ function App() {
           interviews={store.interviews}
           onClose={() => setCalendarOpen(false)}
           onSync={syncInterviewToSystemCalendar}
-          statusColors={store.statusColors}
         />
       ) : null}
 
@@ -2120,8 +2162,8 @@ function App() {
           onResumeFileChange={handleInterviewFormResumeFileChange}
           onSelectJd={selectFormJd}
           onSubmit={submitInterviewForm}
-          roundStatusOptions={DEFAULT_ROUND_STATUSES}
-          statusOptions={statusOptions}
+          roundStatusOptions={ROUND_STATUS_OPTIONS}
+          statusOptions={APPLICATION_STATUS_PRESET_VALUES}
           submitting={interviewFormSubmitting}
         />
       ) : null}
@@ -2393,7 +2435,6 @@ function RoundTimeline({
   onAdd,
   onSelect,
   rounds,
-  statusColors,
 }) {
   return (
     <nav className="round-timeline" aria-label="面试轮次">
@@ -2412,7 +2453,7 @@ function RoundTimeline({
                 title={`${roundLabelFor(round)} · ${status}${round.outcome ? ` · ${round.outcome}` : ""}`}
                 type="button"
               >
-                <span className={`round-step-dot ${interviewStatusTone(status, statusColors)}`} />
+                <span className={`round-step-dot ${roundStatusTone(status)}`} />
                 <span>{roundLabelFor(round)}</span>
                 <small>{round.outcome || status}</small>
               </button>

@@ -1,4 +1,8 @@
 import { Upload, X } from "lucide-react";
+import {
+  MAX_INTERVIEW_DURATION_MINUTES,
+  MIN_INTERVIEW_DURATION_MINUTES,
+} from "../../interview-domain.js";
 import { formatFileSize } from "../../lib/resume-files.js";
 
 export function InterviewFormDialog({
@@ -255,6 +259,18 @@ function RoundFields({
             onChange={(event) => onChange({ scheduledAt: event.target.value })}
           />
         </label>
+        <label>
+          <span>计划时长（分钟）</span>
+          <input
+            max={MAX_INTERVIEW_DURATION_MINUTES}
+            min={MIN_INTERVIEW_DURATION_MINUTES}
+            required
+            step="1"
+            type="number"
+            value={form.durationMinutes}
+            onChange={(event) => onChange({ durationMinutes: event.target.value })}
+          />
+        </label>
         {includeLifecycle ? (
           <label>
             <span>轮次状态</span>
@@ -268,13 +284,19 @@ function RoundFields({
         ) : null}
         {includeLifecycle ? (
           <label>
-            <span>本轮结果</span>
+            <span>本轮结果（不改变流程状态）</span>
             <input
+              list="round-outcome-options"
               maxLength={24}
               value={form.outcome}
               onChange={(event) => onChange({ outcome: event.target.value })}
               placeholder="例如：通过 / 待定"
             />
+            <datalist id="round-outcome-options">
+              <option value="通过" />
+              <option value="待定" />
+              <option value="未通过" />
+            </datalist>
           </label>
         ) : null}
       </div>

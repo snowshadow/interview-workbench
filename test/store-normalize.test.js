@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applicationMetadataPatch,
+  interviewMetadataPatch,
+  mergeStatusOptions,
   normalizeStore,
   withLocalTranscripts,
 } from "../src/lib/store-normalize.js";
@@ -16,6 +18,25 @@ test("normalizeStore preserves a genuinely empty workbench", () => {
   assert.equal(store.activeApplicationId, "");
   assert.deepEqual(store.applications, []);
   assert.deepEqual(store.interviews, []);
+});
+
+test("normalization keeps application status and round duration independent", () => {
+  const store = normalizeStore({
+    applications: [{ id: "application-1", name: "候选人" }],
+    interviews: [
+      { id: "round-1", applicationId: "application-1", durationMinutes: 90 },
+      { id: "round-2", applicationId: "application-1" },
+    ],
+  });
+
+  assert.equal(store.applications[0].applicationStatus, "招聘中");
+  assert.equal(store.interviews[0].durationMinutes, 90);
+  assert.equal(store.interviews[1].durationMinutes, 60);
+  assert.equal(interviewMetadataPatch(store.interviews[0]).durationMinutes, 90);
+  assert.deepEqual(
+    mergeStatusOptions(["一面通过", "未面"]),
+    ["招聘中", "通过", "未通过", "放弃/归档", "一面通过", "未面"],
+  );
 });
 
 test("role short names survive client normalization and application patches", () => {

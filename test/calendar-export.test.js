@@ -19,7 +19,7 @@ import {
   sampleInterview,
 } from "./helpers.js";
 
-test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", () => {
+test("buildInterviewIcs exports each round's configured duration", () => {
   const content = buildInterviewIcs(
     sampleInterview({
       id: "candidate/1",
@@ -27,6 +27,7 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
       jdDraftName: "量化策略研究负责人",
       roleShortName: "量化",
       scheduledAt: "2026-07-12T02:00:00.000Z",
+      durationMinutes: 90,
       roundStatus: "已安排",
     }),
     new Date("2026-07-10T08:30:00.000Z"),
@@ -36,10 +37,17 @@ test("buildInterviewIcs exports the scheduled instant as a one-hour UTC event", 
   assert.match(content, /UID:interview-candidate-1@lingban-workbench\.local/);
   assert.match(content, /DTSTAMP:20260710T083000Z/);
   assert.match(content, /DTSTART:20260712T020000Z/);
-  assert.match(content, /DTEND:20260712T030000Z/);
+  assert.match(content, /DTEND:20260712T033000Z/);
   assert.match(content, /SUMMARY:量化-张青-一面/);
-  assert.match(unfoldedContent, /岗位：量化策略研究负责人\\n轮次：一面\\n轮次状态：已安排/);
+  assert.match(unfoldedContent, /岗位：量化策略研究负责人\\n轮次：一面\\n轮次状态：已安排\\n计划时长：90 分钟/);
   assert.ok(content.endsWith("\r\n"));
+});
+
+test("buildInterviewIcs keeps a one-hour fallback for legacy rounds", () => {
+  const content = buildInterviewIcs(sampleInterview({ durationMinutes: undefined }));
+
+  assert.match(content, /DTSTART:20260712T020000Z/);
+  assert.match(content, /DTEND:20260712T030000Z/);
 });
 
 test("buildInterviewIcs falls back to the complete job name when no short name is set", () => {
@@ -72,6 +80,7 @@ test("scheduledInterviews ignores missing and invalid times", () => {
     sampleInterview({ id: "early", scheduledAt: "2026-07-12T01:00:00.000Z" }),
   ]);
   assert.deepEqual(entries.map(({ interview }) => interview.id), ["early", "late"]);
+  assert.equal(entries[0].endDate.toISOString(), "2026-07-12T02:00:00.000Z");
 });
 
 test("openInterviewInSystemCalendar writes a private file and launches it", async () => {

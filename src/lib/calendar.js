@@ -1,10 +1,9 @@
 import {
   getInterviewRoleLabel,
   inferRoundStatus,
+  resolveInterviewDurationMinutes,
   roundLabelFor,
 } from "../interview-domain.js";
-
-const DEFAULT_INTERVIEW_DURATION_MS = 60 * 60 * 1000;
 
 export function scheduledInterviewDate(interview) {
   if (!interview?.scheduledAt) return null;
@@ -14,9 +13,20 @@ export function scheduledInterviewDate(interview) {
 
 export function scheduledInterviews(interviews) {
   return (Array.isArray(interviews) ? interviews : [])
-    .map((interview) => ({ interview, date: scheduledInterviewDate(interview) }))
+    .map((interview) => ({
+      interview,
+      date: scheduledInterviewDate(interview),
+      endDate: scheduledInterviewEndDate(interview),
+    }))
     .filter((entry) => entry.date)
     .sort((left, right) => left.date - right.date);
+}
+
+export function scheduledInterviewEndDate(interview) {
+  const start = scheduledInterviewDate(interview);
+  if (!start) return null;
+  const durationMinutes = resolveInterviewDurationMinutes(interview?.durationMinutes);
+  return new Date(start.getTime() + durationMinutes * 60 * 1000);
 }
 
 export function startOfLocalDay(value) {
@@ -74,7 +84,8 @@ export function buildInterviewIcs(interview, now = new Date()) {
   const start = scheduledInterviewDate(interview);
   if (!start) throw new Error("这场面试还没有安排时间");
 
-  const end = new Date(start.getTime() + DEFAULT_INTERVIEW_DURATION_MS);
+  const durationMinutes = resolveInterviewDurationMinutes(interview?.durationMinutes);
+  const end = scheduledInterviewEndDate(interview);
   const candidate = String(interview.name || "未命名候选人").trim();
   const role = String(interview.jdDraftName || "未设置岗位").trim();
   const roleLabel = getInterviewRoleLabel(interview);
@@ -95,7 +106,7 @@ export function buildInterviewIcs(interview, now = new Date()) {
     `DTSTART:${formatIcsUtc(start)}`,
     `DTEND:${formatIcsUtc(end)}`,
     `SUMMARY:${escapeIcsText(`${roleLabel}-${candidate}-${roundLabel}`)}`,
-    `DESCRIPTION:${escapeIcsText(`岗位：${role}\n轮次：${roundLabel}\n轮次状态：${status}\n来自灵伴面试工作台`)}`,
+    `DESCRIPTION:${escapeIcsText(`岗位：${role}\n轮次：${roundLabel}\n轮次状态：${status}\n计划时长：${durationMinutes} 分钟\n来自灵伴面试工作台`)}`,
     "STATUS:CONFIRMED",
     "CATEGORIES:面试",
     "END:VEVENT",

@@ -32,8 +32,9 @@ export function sampleInterview(overrides = {}) {
   return {
     id: "candidate-1",
     name: "示例候选人",
-    interviewStatus: "已安排",
+    interviewStatus: "招聘中",
     scheduledAt: "2026-07-12T02:00:00.000Z",
+    durationMinutes: 60,
     resumeMarkdown: "简历预分析",
     roleMarkdown: "岗位要求",
     resumeNotes: [],

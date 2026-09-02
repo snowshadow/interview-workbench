@@ -1,25 +1,18 @@
 import { requestJson } from "../api.js";
 import {
+  APPLICATION_STATUS_PRESETS,
+  DEFAULT_APPLICATION_STATUS,
+  ROUND_STATUS_OPTIONS,
   inferRoundStatus,
-  inferInterviewStatus,
   normalizeStatusColor,
   normalizeStatusLabel,
+  resolveInterviewDurationMinutes,
   roundLabelFor,
 } from "../interview-domain.js";
 
 export const STORE_KEY = "interview-workbench.sessions.v1";
-export const DEFAULT_INTERVIEW_STATUSES = [
-  "招聘中",
-  "通过",
-  "未通过",
-  "放弃/归档",
-  "未面",
-  "已安排",
-  "面试中",
-  "已面待定",
-  "一面通过",
-];
-export const DEFAULT_ROUND_STATUSES = ["待安排", "已安排", "进行中", "已结束", "已取消"];
+export const DEFAULT_INTERVIEW_STATUSES = APPLICATION_STATUS_PRESETS.map(({ value }) => value);
+export const DEFAULT_ROUND_STATUSES = ROUND_STATUS_OPTIONS;
 
 export function safeId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -32,7 +25,7 @@ export function createApplication(name = "未命名候选人") {
     name,
     createdAt: now,
     updatedAt: now,
-    applicationStatus: "招聘中",
+    applicationStatus: DEFAULT_APPLICATION_STATUS,
     resumeMarkdown: "",
     roleMarkdown: "",
     resumeFile: null,
@@ -54,8 +47,9 @@ export function createInterview(name = "未命名面试", options = {}) {
     updatedAt: now,
     sessionStartedAt: null,
     scheduledAt: "",
-    applicationStatus: "招聘中",
-    interviewStatus: "招聘中",
+    durationMinutes: resolveInterviewDurationMinutes(options.durationMinutes),
+    applicationStatus: DEFAULT_APPLICATION_STATUS,
+    interviewStatus: DEFAULT_APPLICATION_STATUS,
     roundOrder,
     roundLabel: roundLabelFor({ roundOrder }),
     roundStatus: "待安排",
@@ -97,6 +91,7 @@ export function interviewMetadataPatch(interview) {
   return {
     sessionStartedAt: interview.sessionStartedAt,
     scheduledAt: interview.scheduledAt,
+    durationMinutes: interview.durationMinutes,
     roundOrder: interview.roundOrder,
     roundLabel: interview.roundLabel,
     roundStatus: interview.roundStatus,
@@ -221,7 +216,7 @@ export function normalizeApplication(application) {
   const merged = { ...fallback, ...application };
   const applicationStatus =
     normalizeStatusLabel(application?.applicationStatus || application?.interviewStatus) ||
-    "招聘中";
+    DEFAULT_APPLICATION_STATUS;
   return {
     ...merged,
     applicationStatus,
@@ -245,7 +240,7 @@ export function normalizeInterview(interview, application = null) {
   const roundOrder = Math.max(1, Number(interview?.roundOrder) || 1);
   const applicationStatus =
     normalizeStatusLabel(shared.applicationStatus || interview?.applicationStatus || interview?.interviewStatus) ||
-    inferInterviewStatus(merged);
+    DEFAULT_APPLICATION_STATUS;
   return {
     ...merged,
     applicationId: shared.id,
@@ -265,6 +260,7 @@ export function normalizeInterview(interview, application = null) {
     outcome: normalizeStatusLabel(interview?.outcome),
     roundFocus: typeof interview?.roundFocus === "string" ? interview.roundFocus : "",
     scheduledAt: normalizeDateValue(interview?.scheduledAt),
+    durationMinutes: resolveInterviewDurationMinutes(interview?.durationMinutes),
     lines: Array.isArray(interview?.lines) ? interview.lines : [],
     transcriptLineCount: Number.isFinite(Number(interview?.transcriptLineCount))
       ? Number(interview.transcriptLineCount)

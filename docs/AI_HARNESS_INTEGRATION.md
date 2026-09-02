@@ -19,11 +19,16 @@
 | `save_interview_artifact` | 保存或覆盖单轮准备和单轮总结 |
 | `link_harness_session` | 把 AI 编程助手会话与指定单轮关联 |
 | `update_application_status` | 仅在用户明确同意后更新应聘流程的招聘状态 |
+| `update_interview_round` | 更新单轮的时间、时长、生命周期、重点或结果 |
 | `update_interview_status` | 兼容旧调用：通过轮次 ID 更新所属流程的招聘状态 |
 
-`create_interview_round` 接收 `applicationId`、`roundLabel`、`scheduledAt`、`roundFocus` 和可选的 `roundStatus`，调用 `POST /api/applications/:id/rounds`。未传 `roundStatus` 时，工作台根据 `scheduledAt` 推导为“待安排”或“已安排”。轮次状态只描述机械生命周期：待安排、已安排、进行中、已结束、已取消，由创建、开始、停止、取消等工作台动作维护，不代表招聘结论。
+`create_interview_round` 接收 `applicationId`、`roundLabel`、`scheduledAt`、`durationMinutes`、`roundFocus` 和可选的 `roundStatus`，调用 `POST /api/applications/:id/rounds`。`durationMinutes` 是 1–1440 的整数，省略时为 60。未传 `roundStatus` 时，工作台根据 `scheduledAt` 推导为“待安排”或“已安排”。轮次状态只描述机械生命周期：待安排、已安排、进行中、已结束、已取消；本轮结论写入 `outcome`，两者都不代表 Application 的最终招聘状态。
 
-`save_application_artifact` 调用 `PUT /api/applications/:id/artifacts/:kind`，来源会话信息会随产物保存。新调用应使用 `update_application_status` 更新招聘状态；`update_interview_status` 只为旧客户端保留，其 `interviewStatus` 仍映射到该轮所属 Application 的 `applicationStatus`，不会修改 `roundStatus`。
+`list_interviews` 分别使用 `applicationStatus` 和 `roundStatus` 过滤招聘状态与轮次生命周期；旧参数 `status` 只作为 `applicationStatus` 的兼容别名。
+
+旧版把“未面”“已安排”“一面通过”等轮次信息写进 Application 状态的数据仍可读取和筛选，但不能继续新建或覆盖写入。自定义流程状态仍可使用；排期写 `roundStatus`，本轮结论写 `outcome`。
+
+`save_application_artifact` 和 `save_interview_artifact` 通过 `includeInCrossRoundContext` 明确声明产物是否自动进入后续轮次上下文。新的自定义 `kind` 必须显式传入该字段，已有产物更新时省略则保留原值。单轮详细报告 `interview-summary` 默认排除，精简交接 `round-handoff` 默认纳入，避免下一轮重复注入两份同源内容。新调用应使用 `update_application_status` 更新招聘状态，用 `update_interview_round` 更新轮次；`update_interview_status` 只为旧客户端保留。
 
 使用 MCP 前需要先启动工作台服务：
 
@@ -92,7 +97,7 @@ WORKBENCH_ACCESS_TOKEN=your-local-secret
 2. 读取共享资料和该轮准备、备注与 AI 追问；
 3. 分段读取该轮完整转录；
 4. 生成基于证据的面试报告；
-5. 把报告保存为该轮的 `interview-summary` 产物。
+5. 把报告保存为该轮的 `interview-summary`，并把精简交接保存为 `round-handoff`；只有后者自动进入下一轮上下文。
 
 安排下一轮时，先用 `get_application_context` 读取此前各轮形成的**已确认事实、未验证风险、矛盾点和下一轮目标**，再将新的准备稿保存到新轮次。跨轮上下文默认不拼接所有历史转录；只有摘要无法支撑判断时，才用 `get_transcript_chunk` 定向读取某一轮的相关内容。需要持续维护的跨轮交接内容通过 `save_application_artifact` 回写到 Application。
 

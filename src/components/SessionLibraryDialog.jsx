@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Search, X } from "lucide-react";
 import {
+  DEFAULT_APPLICATION_STATUS,
   compareApplications,
   formatShortDateTime,
   getApplicationRole,
@@ -34,7 +35,7 @@ export function SessionLibraryDialog({
     const keyword = query.trim().toLocaleLowerCase();
     return applications
       .filter((application) => {
-        const status = application.applicationStatus || "招聘中";
+        const status = application.applicationStatus || DEFAULT_APPLICATION_STATUS;
         const rounds = roundsForApplication(interviews, application.id);
         if (statusFilter !== "all" && status !== statusFilter) return false;
         if (roleFilter !== "all" && getApplicationRole(application) !== roleFilter) return false;
@@ -84,7 +85,7 @@ export function SessionLibraryDialog({
           {visibleApplications.length ? visibleApplications.map((application) => {
             const rounds = roundsForApplication(interviews, application.id);
             const preferredRound = preferredRoundForApplication(interviews, application.id);
-            const status = application.applicationStatus || "招聘中";
+            const status = application.applicationStatus || DEFAULT_APPLICATION_STATUS;
             return <button
               className={`session-row application-row ${application.id === activeApplicationId ? "selected" : ""}`}
               disabled={!preferredRound}

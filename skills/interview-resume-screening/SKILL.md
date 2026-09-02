@@ -33,6 +33,6 @@ Write in the user's language. Keep the report concise and decision-led:
 
 Use the organization's own decision labels when supplied. Do not invent a universal score or hiring threshold.
 
-Resume screening belongs to the Application, not an individual Round. When one exact candidate-and-role Application exists, save the final Markdown with `save_application_artifact`, kind `resume-screening`, and title `Resume screening`, then verify it through `get_application_context`.
+Resume screening belongs to the Application, not an individual Round. When one exact candidate-and-role Application exists, save the final Markdown with `save_application_artifact`, kind `resume-screening`, title `Resume screening`, and `includeInCrossRoundContext: false`, then verify it through `get_application_context`. Later-round Skills can still read the Application artifact directly; the false flag only keeps it out of automatically assembled cross-round briefs.
 
 Do not create a Round merely to store screening. If no exact Application exists, return the result without attaching it to a guessed record. Do not change Application status unless the user explicitly asks.
