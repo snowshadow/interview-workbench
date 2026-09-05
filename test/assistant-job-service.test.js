@@ -165,7 +165,7 @@ test("scheduler prioritizes manual work and runs different rounds concurrently",
   assert.equal(fixture.calls.length, 2);
   fixture.service.stop();
   wait.resolve();
-  await new Promise((resolve) => setImmediate(resolve));
+  await Promise.all(fixture.runs);
 });
 
 test("the round preparation artifact wins over resume background", async () => {
@@ -185,8 +185,10 @@ test("import wakes an idle scheduler for restored pending work", async () => {
   fixture.service.drain();
   assert.equal(fixture.service.running.size, 0);
   fixture.service.replaceStore(() => fixture.store.updateAssistantJob(job.id, { status: "retrying" }));
+  keepScheduledRunAlive(fixture.service);
   await started.promise;
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.runs.length, 1);
+  await fixture.runs[0];
   assert.equal(fixture.service.get(job.id).status, "done");
   assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 2);
   fixture.service.stop();
@@ -215,14 +217,16 @@ for (const oldOutcome of ["success", "failure"]) {
       state: { revision: 0, processedLineCount: 0, updatedAt: null, topics: [{ id: "restored-topic" }], followups: [] },
       job: { ...job, status: "retrying" },
     }));
+    keepScheduledRunAlive(fixture.service);
     await restoredStarted.promise;
+    assert.equal(fixture.runs.length, 2);
     oldRequest.resolve();
     await oldRun;
     assert.equal(fixture.service.get(job.id).status, "running");
     assert.equal(fixture.service.running.size, 1, "old finally must not remove the restored run's slot");
     assert.deepEqual(fixture.store.getAssistantState("r1").topics, [{ id: "restored-topic" }]);
     restoredRequest.resolve();
-    await new Promise((resolve) => setImmediate(resolve));
+    await fixture.runs[1];
     assert.equal(fixture.service.get(job.id).status, "done");
     assert.equal(fixture.store.getAssistantState("r1").revision, 1);
     assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 2);
@@ -256,6 +260,13 @@ function deferred() {
   return { promise, resolve };
 }
 
+function keepScheduledRunAlive(service) {
+  // Production unrefs this timer because the HTTP server owns process lifetime.
+  // These isolated tests must keep it alive until the observed run starts.
+  assert.ok(service.timer, "restoring work must schedule the idle worker");
+  service.timer.ref();
+}
+
 function setup(analyze = unchanged, options = {}) {
   const interviews = { r1: { id: "r1", lines: [{ id: "q1", text: "问题", speaker: "1" }, { id: "a1", text: "回答", speaker: "2" }], artifacts: [], resumeMarkdown: "简历背景", roleMarkdown: "岗位", speakerLabels: { "1": "面试官", "2": "候选人" } } };
   const states = new Map();
@@ -286,8 +297,15 @@ function setup(analyze = unchanged, options = {}) {
     retryAssistantJob: (id) => store.updateAssistantJob(id, { status: "queued", attempts: 0, error: "" }),
   };
   const service = new AssistantJobService({ store, provider: { analyze: async (input, requestOptions) => { calls.push(structuredClone(input)); return analyze(input, requestOptions); } }, concurrency: 0, ...options });
+  const runs = [];
+  const run = service.run.bind(service);
+  service.run = (job) => {
+    const completion = run(job);
+    runs.push(completion);
+    return completion;
+  };
   return {
-    interviews, calls, store, service,
+    interviews, calls, store, service, runs,
     restore({ state, job }) {
       states.set(job.interviewId, structuredClone(state));
       jobs.clear();
