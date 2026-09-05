@@ -29,27 +29,46 @@
 
 ## 工作台界面
 
-简历、页面备注、AI 追问与实时转录位于同一个面试工作区。日历用于查看面试安排，流程库用于在候选人、岗位、状态和轮次之间切换。
+简历、原文标注、AI 追问与实时转录位于同一个面试工作区，左侧导航可切换日历和流程库。
 
-拖动模块之间的分隔线可以调整简历与分析区域的宽度，以及 AI 追问和转录的高度。布局会自动保存，双击分隔线可恢复默认比例；也可以聚焦分隔线后用方向键微调。内容随模块宽度调整，窄窗口会自动改为上下排列，各模块可单独放大阅读。
+<p><sub>本节截图均来自实际应用，候选人、简历、转录和面试安排均为虚构演示数据。点击图片可查看大图。</sub></p>
 
-流程状态选项自动合并已保存的标签和流程库中实际使用的状态，已有状态均可重新选择，也可以添加自定义状态。新建、编辑和筛选共用这份完整列表。
-
-选中 PDF 或 Word 预览中的原文后，点击**添加标注**即可留下高亮批注；也可以开启**标记**，直接点击页面位置。悬停编号查看批注，点击后固定，点击批注文字即可编辑并自动保存。**全部标注**提供可搜索的浮动总览，点击条目回到原文，打开时不改变简历宽度。旧位置标注继续保留；扫描件没有可选文字时仍可使用位置标注。删除标注后可撤销，保存失败会保留本地修改并提供重试。
-
-<a href="docs/assets/interview-workbench-macos.webp">
-  <img src="docs/assets/interview-workbench-macos.webp" alt="面试工作台主界面：简历、备注、AI 追问与实时转录" width="100%">
+<a href="docs/assets/interview-workbench.jpg">
+  <img src="docs/assets/interview-workbench.jpg" alt="新版面试工作台：左侧导航、轮次时间线，以及可调整大小的简历、AI 追问和实时转录模块；使用虚构演示数据" width="100%">
 </a>
+
+拖动分隔线可调整简历与分析区域的宽度，以及 AI 追问和转录的高度。布局自动保存，双击分隔线可恢复默认比例，也可用方向键微调。内容随模块宽度调整，窄窗口自动改为上下排列，各模块可单独放大阅读。
+
+选中 PDF 或 Word 原文后，点击**添加标注**留下高亮批注；也可开启**标记**，直接点击页面位置。悬停编号查看批注，点击后固定，点击批注文字即可编辑并自动保存。**全部标注**提供可搜索的浮动总览，点击条目回到原文，打开时不改变简历宽度。
 
 <table>
   <tr>
     <td width="50%" align="center" valign="top">
-      <a href="docs/assets/interview-calendar.webp"><img src="docs/assets/interview-calendar.webp" alt="面试日历界面" width="100%"></a><br>
+      <a href="docs/assets/resume-inline-annotation.jpg"><img src="docs/assets/resume-inline-annotation.jpg" alt="简历专注模式中的原文高亮和浮动批注，支持就地编辑与自动保存；使用虚构演示数据" width="100%"></a><br>
+      <strong>原文批注</strong><br>
+      <sub>批注贴近原文，点击内容即可编辑</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/resume-annotation-overview.jpg"><img src="docs/assets/resume-annotation-overview.jpg" alt="全部标注浮动总览：搜索标注或原文，点击条目定位，不挤占简历宽度；使用虚构演示数据" width="100%"></a><br>
+      <strong>全部标注</strong><br>
+      <sub>快速搜索与定位，不挤占简历宽度</sub>
+    </td>
+  </tr>
+</table>
+
+旧位置标注继续保留，扫描件没有可选文字时仍可使用位置标注。删除后可撤销，保存失败会保留本地修改并提供重试。
+
+日历按周或月展示面试安排；流程库按岗位、状态和轮次管理候选人。流程状态自动合并已保存标签和实际使用的状态，新建、编辑和筛选共用完整列表，也支持自定义状态与颜色。
+
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/assets/interview-calendar.jpg"><img src="docs/assets/interview-calendar.jpg" alt="新版面试日历周视图：展示候选人、岗位和轮次的排期；使用虚构演示数据" width="100%"></a><br>
       <strong>日历</strong><br>
       <sub>按周或按月查看多轮面试安排</sub>
     </td>
     <td width="50%" align="center" valign="top">
-      <a href="docs/assets/interview-process-library.webp"><img src="docs/assets/interview-process-library.webp" alt="面试流程库界面" width="100%"></a><br>
+      <a href="docs/assets/interview-process-library.jpg"><img src="docs/assets/interview-process-library.jpg" alt="新版面试流程库：搜索候选人，按岗位和流程状态筛选，查看面试轮次；使用虚构演示数据" width="100%"></a><br>
       <strong>流程库</strong><br>
       <sub>按岗位、状态和更新时间管理应聘流程</sub>
     </td>
@@ -97,7 +116,7 @@
 - 一个应聘流程下支持一面、二面、终面或加面；共享简历和 JD，每轮独立保存时间、转录、追问与结论
 - 面试流程库、轮次时间线、可自定义招聘状态、计划面试时间和时长
 - 周/月日历预览，可将单场面试同步到 macOS 系统日历
-- PDF、DOC、DOCX 简历预览、替换、缩放、最大化和位置备注
+- PDF、DOC、DOCX 简历预览、替换、缩放和最大化；原文高亮、位置标注、就地编辑与可搜索的标注总览
 - JD 库、简历预分析和面试准备 Markdown
 - 按片段提交的持久化 AI 任务，失败自动重试，服务重启后继续执行
 - SQLite 本机存储，简历附件独立保存
