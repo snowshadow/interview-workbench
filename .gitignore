@@ -15,3 +15,10 @@ coverage/
 # Local recruiting material must never enter the public repository.
 *-面试准备.md
 火山文档.md
+/*.md
+!/README.md
+!/ARCHITECTURE.md
+!/CONTRIBUTING.md
+!/PRIVACY.md
+!/RELEASE_CHECKLIST.md
+!/SECURITY.md

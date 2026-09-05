@@ -7,13 +7,12 @@ import {
   CalendarDays,
   Download,
   Ellipsis,
-  FileText,
   ListFilter,
   Maximize2,
   Minimize2,
   MonitorSpeaker,
-  MousePointer2,
   Mic,
+  PanelsTopLeft,
   Pause,
   Pencil,
   Play,
@@ -21,18 +20,17 @@ import {
   RefreshCw,
   Settings,
   Square,
-  StickyNote,
   X,
   Trash2,
   Upload,
   WandSparkles,
-  ZoomIn,
-  ZoomOut,
 } from "lucide-react";
 import "./styles.css";
+import "./workbench.css";
 import { InterviewCalendarDialog } from "./components/InterviewCalendarDialog.jsx";
 import { SessionLibraryDialog } from "./components/SessionLibraryDialog.jsx";
-import { PanelTitle, StatusPill } from "./components/WorkbenchPrimitives.jsx";
+import { ApplicationStatusPicker } from "./components/ApplicationStatusPicker.jsx";
+import { PanelTitle } from "./components/WorkbenchPrimitives.jsx";
 import { TranscriptPanel } from "./components/TranscriptPanel.jsx";
 import { AnalysisCardList, isPendingAnalyzeCard } from "./components/AnalysisCardList.jsx";
 import { InterviewFormDialog } from "./components/dialogs/InterviewFormDialog.jsx";
@@ -40,9 +38,11 @@ import {
   ProviderSettingsDialog,
   createProviderSettingsDraft,
 } from "./components/dialogs/ProviderSettingsDialog.jsx";
-import { ResumeDocument } from "./components/resume/ResumeDocument.jsx";
+import { ResumePane } from "./components/resume/ResumePane.jsx";
+import { enqueueApplicationSave, preservePendingAnnotations, upsertNote } from "./lib/resume-annotations.js";
+import { SplitPane } from "./components/SplitPane.jsx";
+import { readUiPreferences, saveUiPreferences } from "./lib/ui-preferences.js";
 import {
-  APPLICATION_STATUS_PRESETS,
   DEFAULT_APPLICATION_STATUS,
   DEFAULT_INTERVIEW_DURATION_MINUTES,
   MAX_INTERVIEW_DURATION_MINUTES,
@@ -51,14 +51,11 @@ import {
   formatShortDateTime,
   inferRoundStatus,
   interviewStatusTone,
-  isRetiredApplicationStatus,
   isValidInterviewDurationMinutes,
   normalizeStatusLabel,
   roundLabelFor,
   roundStatusTone,
   roundsForApplication,
-  STATUS_COLOR_OPTIONS,
-  statusColorFor,
 } from "./interview-domain.js";
 import {
   ApiError,
@@ -78,7 +75,7 @@ import {
 import {
   DEFAULT_INTERVIEW_STATUSES,
   STORE_KEY,
-  applicationMetadataPatch,
+  applicationMetadataChanges,
   clearLegacyInterviewStore,
   interviewMetadataPatch,
   loadRemoteInterviewStore,
@@ -97,8 +94,6 @@ import {
 } from "./lib/transcript.js";
 import { CHUNK_MS, CHUNK_SAMPLES, floatTo16BitPcm, resampleTo16k } from "./lib/audio-pipeline.js";
 import {
-  formatFileSize,
-  isPdfFile,
   isWordFile,
   serializeResumeFile,
 } from "./lib/resume-files.js";
@@ -120,7 +115,6 @@ if (!Promise.withResolvers) {
   };
 }
 
-const UI_PREF_KEY = "interview-workbench.ui.v1";
 const EMPTY_APPLICATION = {
   id: "",
   name: "",
@@ -157,8 +151,6 @@ const EMPTY_INTERVIEW = {
   lastProcessedLineCount: 0,
   speakerLabels: {},
 };
-const APPLICATION_STATUS_PRESET_VALUES = APPLICATION_STATUS_PRESETS.map(({ value }) => value);
-const RETIRED_APPLICATION_STATUS_ERROR = "该状态属于旧版或面试轮次，不能作为应聘流程状态";
 
 function App() {
   const [store, setStore] = useState(loadInterviewStore);
@@ -184,16 +176,10 @@ function App() {
   const [speakerEditorOpen, setSpeakerEditorOpen] = useState(false);
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
   const [customStatusDraft, setCustomStatusDraft] = useState("");
-  const [markMode, setMarkMode] = useState(false);
-  const [noteDraft, setNoteDraft] = useState(null);
-  const [noteEditor, setNoteEditor] = useState(null);
-  const [selectedNoteId, setSelectedNoteId] = useState("");
-  const [resumeZoom, setResumeZoom] = useState(1);
-  const [resumeFocusMode, setResumeFocusMode] = useState(false);
   const [resumePreviewError, setResumePreviewError] = useState("");
   const [resumeReplacing, setResumeReplacing] = useState(false);
-  const [notesView, setNotesView] = useState("hidden");
-  const [workspaceSplit, setWorkspaceSplit] = useState(loadWorkspaceSplit);
+  const [annotationSaveStates, setAnnotationSaveStates] = useState({});
+  const [focusedPanel, setFocusedPanel] = useState("");
   const [audioSourceMode, setAudioSourceMode] = useState(loadAudioSourceMode);
 
   const wsRef = useRef(null);
@@ -209,13 +195,12 @@ function App() {
   if (!partialTextBridgeRef.current) partialTextBridgeRef.current = createPartialTextBridge();
   const partialTextBridge = partialTextBridgeRef.current;
   const runIdRef = useRef("");
-  const resumeScrollerRef = useRef(null);
-  const resumeReplaceInputRef = useRef(null);
-  const workspaceRef = useRef(null);
-  const workspaceResizeRef = useRef(null);
   const captureAttemptRef = useRef("");
   const metadataPersistTimersRef = useRef(new Map());
   const applicationPersistTimersRef = useRef(new Map());
+  const applicationPendingPatchesRef = useRef(new Map());
+  const applicationSaveQueuesRef = useRef(new Map());
+  const unsavedAnnotationsRef = useRef(new Set());
   const retryAnalysisCardRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
@@ -289,15 +274,10 @@ function App() {
   const handleRetryCard = useCallback((card) => retryAnalysisCardRef.current(card), []);
 
   useEffect(() => {
-    setMarkMode(false);
-    setNoteDraft(null);
-    setNoteEditor(null);
-    setSelectedNoteId("");
     setSpeakerEditorOpen(false);
     setStatusPickerOpen(false);
     setCustomStatusDraft("");
-    setResumeZoom(1);
-    setResumeFocusMode(false);
+    setFocusedPanel("");
     setResumePreviewError("");
   }, [activeInterviewId]);
 
@@ -337,13 +317,12 @@ function App() {
   useEffect(() => {
     function handleEscape(event) {
       if (event.key !== "Escape") return;
-      if (resumeFocusMode) setResumeFocusMode(false);
-      if (notesView === "focus") setNotesView("sidebar");
+      setFocusedPanel("");
     }
 
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
-  }, [notesView, resumeFocusMode]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -375,13 +354,14 @@ function App() {
       // 否则远端旧快照会把这次修改覆盖回来。
       if (
         metadataPersistTimersRef.current.size > 0 ||
-        applicationPersistTimersRef.current.size > 0
+        applicationPersistTimersRef.current.size > 0 || applicationSaveQueuesRef.current.size > 0 ||
+        unsavedAnnotationsRef.current.size > 0
       ) return;
       loadRemoteInterviewStore()
         .then((remoteStore) => {
           if (remoteStore) {
             setStore((current) =>
-              withLocalTranscripts(
+              mergeRemoteStore(
                 preserveActiveInterview(remoteStore, current.activeInterviewId),
                 current,
               ),
@@ -394,6 +374,16 @@ function App() {
     window.addEventListener("focus", refreshStoreOnFocus);
     return () => window.removeEventListener("focus", refreshStoreOnFocus);
   }, [storeReady]);
+
+  useEffect(() => {
+    function protectPendingNotes(event) {
+      if (!unsavedAnnotationsRef.current.size) return;
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", protectPendingNotes);
+    return () => window.removeEventListener("beforeunload", protectPendingNotes);
+  }, []);
 
   useEffect(() => {
     refreshHealth();
@@ -434,10 +424,6 @@ function App() {
   const canManageWorkbench =
     storeReady && (status === "idle" || status === "stopped" || status === "error");
   const canSwitchInterview = canManageWorkbench && hasActiveInterview;
-  const canMarkResume = Boolean(
-    resumeFile &&
-      (isPdfFile(resumeFile) || (isWordFile(resumeFile) && resumeFile.previewText)),
-  );
   const pendingJobIds = useMemo(() => {
     return store.interviews.flatMap((interview) =>
       interview.cards
@@ -498,16 +484,15 @@ function App() {
       });
       let applications = prev.applications;
       let changedApplication = null;
+      let applicationPatch = null;
       if (changedInterview) {
         const currentApplication = prev.applications.find(
           (application) => application.id === changedInterview.applicationId,
         );
         if (currentApplication) {
-          const sharedPatch = applicationMetadataPatch(changedInterview);
-          const sharedChanged = Object.entries(sharedPatch).some(
-            ([key, value]) => currentApplication[key] !== value,
-          );
-          if (sharedChanged) {
+          const sharedPatch = applicationMetadataChanges(currentApplication, changedInterview);
+          if (Object.keys(sharedPatch).length) {
+            applicationPatch = sharedPatch;
             changedApplication = { ...currentApplication, ...sharedPatch, updatedAt };
             applications = prev.applications.map((application) =>
               application.id === changedApplication.id ? changedApplication : application,
@@ -524,7 +509,8 @@ function App() {
             );
           }
         }
-        scheduleInterviewMetadataPersist(changedInterview, changedApplication);
+        scheduleInterviewMetadataPersist(changedInterview);
+        if (changedApplication) scheduleApplicationMetadataPersist(changedApplication.id, applicationPatch);
       }
       return {
         ...prev,
@@ -534,7 +520,11 @@ function App() {
     });
   }
 
-  function scheduleInterviewMetadataPersist(interview, application = null) {
+  function mergeRemoteStore(remote, current) {
+    return withLocalTranscripts(preservePendingAnnotations(remote, current, unsavedAnnotationsRef.current), current);
+  }
+
+  function scheduleInterviewMetadataPersist(interview) {
     const existing = metadataPersistTimersRef.current.get(interview.id);
     if (existing) window.clearTimeout(existing);
     const timer = window.setTimeout(async () => {
@@ -555,37 +545,42 @@ function App() {
       }
     }, 350);
     metadataPersistTimersRef.current.set(interview.id, timer);
-    if (application) scheduleApplicationMetadataPersist(application);
   }
 
-  function scheduleApplicationMetadataPersist(application) {
-    const existing = applicationPersistTimersRef.current.get(application.id);
+  function scheduleApplicationMetadataPersist(applicationId, patch) {
+    const pending = { ...applicationPendingPatchesRef.current.get(applicationId), ...patch };
+    applicationPendingPatchesRef.current.set(applicationId, pending);
+    const existing = applicationPersistTimersRef.current.get(applicationId);
     if (existing) window.clearTimeout(existing);
     const timer = window.setTimeout(async () => {
+      applicationPendingPatchesRef.current.delete(applicationId);
       try {
-        await requestJson(`/api/applications/${encodeURIComponent(application.id)}`, {
+        await enqueueApplicationSave(applicationSaveQueuesRef.current, applicationId, () => requestJson(`/api/applications/${encodeURIComponent(applicationId)}`, {
           method: "PATCH",
-          body: JSON.stringify(applicationMetadataPatch(application)),
-        });
+          body: JSON.stringify(pending),
+        }));
+        if (applicationPersistTimersRef.current.get(applicationId) === timer) {
+          unsavedAnnotationsRef.current.delete(applicationId);
+          setAnnotationSaveStates((current) => ({ ...current, [applicationId]: "saved" }));
+        }
         setPersistError("");
       } catch {
+        if (applicationPersistTimersRef.current.get(applicationId) === timer) {
+          setAnnotationSaveStates((current) => ({ ...current, [applicationId]: "error" }));
+        }
         setPersistError("应聘流程资料保存失败，请先导出 Markdown 兜底");
       } finally {
-        if (applicationPersistTimersRef.current.get(application.id) === timer) {
-          applicationPersistTimersRef.current.delete(application.id);
+        if (applicationPersistTimersRef.current.get(applicationId) === timer) {
+          applicationPersistTimersRef.current.delete(applicationId);
         }
       }
     }, 350);
-    applicationPersistTimersRef.current.set(application.id, timer);
+    applicationPersistTimersRef.current.set(applicationId, timer);
   }
 
   function applyActiveApplicationStatus(value, { keepPickerOpen = false } = {}) {
     const nextStatus = normalizeStatusLabel(value);
     if (!nextStatus) return;
-    if (isRetiredApplicationStatus(nextStatus)) {
-      setError(RETIRED_APPLICATION_STATUS_ERROR);
-      return;
-    }
     setError("");
     setStore((prev) => {
       const updatedAt = new Date().toISOString();
@@ -611,10 +606,10 @@ function App() {
     });
     setCustomStatusDraft("");
     setStatusPickerOpen(keepPickerOpen);
-    requestJson(`/api/applications/${encodeURIComponent(activeApplication.id)}`, {
+    enqueueApplicationSave(applicationSaveQueuesRef.current, activeApplication.id, () => requestJson(`/api/applications/${encodeURIComponent(activeApplication.id)}`, {
       method: "PATCH",
       body: JSON.stringify({ applicationStatus: nextStatus }),
-    }).catch(() => setPersistError("应聘流程状态保存失败"));
+    })).catch(() => setPersistError("应聘流程状态保存失败"));
   }
 
   function applyStatusColor(color) {
@@ -773,14 +768,9 @@ function App() {
       const remoteStore = await loadRemoteInterviewStore();
       if (remoteStore) {
         setStore((current) =>
-          withLocalTranscripts({ ...remoteStore, activeInterviewId }, current),
+          mergeRemoteStore({ ...remoteStore, activeInterviewId }, current),
         );
       }
-      setMarkMode(false);
-      setNoteDraft(null);
-      setNoteEditor(null);
-      setSelectedNoteId("");
-      setNotesView("hidden");
       setResumePreviewError("");
       setPersistError("");
     } catch (replacementError) {
@@ -846,13 +836,6 @@ function App() {
         if (!name) throw new Error("请填写候选人姓名");
         const applicationStatusValue = normalizeStatusLabel(interviewForm.applicationStatus);
         if (!applicationStatusValue) throw new Error("请填写应聘流程状态");
-        const keepsExistingRetiredStatus =
-          interviewForm.mode === "edit-application" &&
-          isRetiredApplicationStatus(applicationStatusValue) &&
-          applicationStatusValue === normalizeStatusLabel(activeApplication.applicationStatus);
-        if (isRetiredApplicationStatus(applicationStatusValue) && !keepsExistingRetiredStatus) {
-          throw new Error(RETIRED_APPLICATION_STATUS_ERROR);
-        }
         const roleMarkdownValue = interviewForm.roleMarkdown.trim();
         const roleShortNameValue = interviewForm.roleShortName.trim();
         const jdName =
@@ -880,7 +863,7 @@ function App() {
 
         const applicationPatch = {
           name,
-          ...(keepsExistingRetiredStatus ? {} : { applicationStatus: applicationStatusValue }),
+          applicationStatus: applicationStatusValue,
           selectedJdId: nextJdId,
           jdDraftName: jdName,
           roleShortName: roleShortNameValue,
@@ -924,7 +907,7 @@ function App() {
       const remoteStore = await loadRemoteInterviewStore();
       if (remoteStore) {
         setStore((current) =>
-          withLocalTranscripts(
+          mergeRemoteStore(
             preserveActiveInterview(remoteStore, nextActiveId),
             current,
           ),
@@ -969,7 +952,7 @@ function App() {
       const remoteStore = await loadRemoteInterviewStore();
       if (remoteStore) {
         setStore((current) =>
-          withLocalTranscripts(
+          mergeRemoteStore(
             preserveActiveInterview(remoteStore, adjacentRound.id),
             current,
           ),
@@ -999,140 +982,30 @@ function App() {
       });
       const remoteStore = await loadRemoteInterviewStore();
       if (remoteStore) {
-        setStore((current) => withLocalTranscripts(remoteStore, current));
+        setStore((current) => mergeRemoteStore(remoteStore, current));
       }
     } catch (err) {
       setError(err.message || "归档应聘流程失败");
     }
   }
 
-  function handleResumeMark(event, anchor = {}) {
-    if (!markMode) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = Math.min(0.98, Math.max(0.02, (event.clientX - rect.left) / rect.width));
-    const y = Math.min(0.98, Math.max(0.02, (event.clientY - rect.top) / rect.height));
-    setNoteEditor(null);
-    setNoteDraft({
-      id: safeId(),
-      x,
-      y,
-      text: "",
-      coordinateMode: anchor.coordinateMode || "document",
-      pageNumber: anchor.pageNumber || null,
-    });
+  function saveResumeAnnotation(note) {
+    if (!note.text.trim()) return;
+    unsavedAnnotationsRef.current.add(activeApplication.id);
+    setAnnotationSaveStates((current) => ({ ...current, [activeApplication.id]: "saving" }));
+    updateActiveInterview((interview) => ({ resumeNotes: upsertNote(interview.resumeNotes || [], note) }));
   }
 
-  function saveResumeNote() {
-    const text = noteDraft?.text?.trim();
-    if (!text) {
-      setError("备注内容为空");
-      return;
-    }
-    setError("");
-    updateActiveInterview((interview) => ({
-      resumeNotes: [
-        {
-          ...noteDraft,
-          text,
-          createdAt: new Date().toISOString(),
-        },
-        ...(interview.resumeNotes || []),
-      ],
-    }));
-    setSelectedNoteId(noteDraft.id);
-    setNoteDraft(null);
-    setMarkMode(false);
-    setNotesView("sidebar");
+  function deleteResumeAnnotation(noteId) {
+    unsavedAnnotationsRef.current.add(activeApplication.id);
+    setAnnotationSaveStates((current) => ({ ...current, [activeApplication.id]: "saving" }));
+    updateActiveInterview((interview) => ({ resumeNotes: (interview.resumeNotes || []).filter((note) => note.id !== noteId) }));
   }
 
-  function deleteResumeNote(noteId) {
-    updateActiveInterview((interview) => ({
-      resumeNotes: (interview.resumeNotes || []).filter((note) => note.id !== noteId),
-    }));
-    if (selectedNoteId === noteId) setSelectedNoteId("");
-    setNoteEditor((editor) => (editor?.id === noteId ? null : editor));
-  }
-
-  function saveNoteEditor() {
-    if (!noteEditor) return;
-    const text = noteEditor.text?.trim();
-    if (!text) {
-      setError("备注内容为空");
-      return;
-    }
-    setError("");
-    updateActiveInterview((interview) => ({
-      resumeNotes: (interview.resumeNotes || []).map((note) =>
-        note.id === noteEditor.id ? { ...note, text } : note,
-      ),
-    }));
-    setNoteEditor(null);
-  }
-
-  function focusResumeNote(note) {
-    setSelectedNoteId(note.id);
-    setNoteDraft(null);
-    setNoteEditor({ ...note });
-    if (notesView === "focus") setNotesView("sidebar");
-    const scroller = resumeScrollerRef.current;
-    if (!scroller) return;
-    window.requestAnimationFrame(() => {
-      const marker = Array.from(
-        scroller.querySelectorAll("[data-resume-note-id]"),
-      ).find((element) => element.dataset.resumeNoteId === note.id);
-      if (marker) {
-        marker.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
-        return;
-      }
-      const targetTop = note.y * scroller.scrollHeight - scroller.clientHeight / 2;
-      scroller.scrollTo({
-        top: Math.max(0, Math.min(targetTop, scroller.scrollHeight - scroller.clientHeight)),
-        behavior: "smooth",
-      });
-    });
-  }
-
-  function changeResumeZoom(delta) {
-    setResumeZoom((current) => clampNumber(Number((current + delta).toFixed(1)), 0.5, 2));
-  }
-
-  function startWorkspaceResize(event) {
-    const workspace = workspaceRef.current;
-    if (!workspace || window.innerWidth <= 900) return;
-    const rect = workspace.getBoundingClientRect();
-    event.preventDefault();
-    const resize = { rect, nextSplit: workspaceSplit };
-    workspaceResizeRef.current = resize;
-    document.body.classList.add("workspace-resizing");
-
-    function moveWorkspaceResize(pointerEvent) {
-      if (workspaceResizeRef.current !== resize) return;
-      const usableWidth = Math.max(1, resize.rect.width - 8);
-      const minLeft = Math.min(520, usableWidth * 0.48);
-      const minRight = Math.min(420, usableWidth * 0.4);
-      const leftWidth = clampNumber(
-        pointerEvent.clientX - resize.rect.left,
-        minLeft,
-        Math.max(minLeft, usableWidth - minRight),
-      );
-      resize.nextSplit = (leftWidth / usableWidth) * 100;
-      workspace.style.setProperty("--resume-pane-width", `${resize.nextSplit}%`);
-    }
-
-    function endWorkspaceResize() {
-      if (workspaceResizeRef.current !== resize) return;
-      workspaceResizeRef.current = null;
-      document.body.classList.remove("workspace-resizing");
-      window.removeEventListener("pointermove", moveWorkspaceResize);
-      window.removeEventListener("pointerup", endWorkspaceResize);
-      window.removeEventListener("pointercancel", endWorkspaceResize);
-      setWorkspaceSplit(resize.nextSplit);
-      saveWorkspaceSplit(resize.nextSplit);
-    }
-
-    window.addEventListener("pointermove", moveWorkspaceResize);
-    window.addEventListener("pointerup", endWorkspaceResize);
-    window.addEventListener("pointercancel", endWorkspaceResize);
+  function retryResumeAnnotations() {
+    unsavedAnnotationsRef.current.add(activeApplication.id);
+    setAnnotationSaveStates((current) => ({ ...current, [activeApplication.id]: "saving" }));
+    scheduleApplicationMetadataPersist(activeApplication.id, { resumeNotes });
   }
 
   async function startInterview() {
@@ -1801,109 +1674,44 @@ function App() {
 
   return (
     <main className="app">
-      <header className="topbar">
-        <div className="brand">
-          <img className="brand-icon" src="/favicon.png" alt="" aria-hidden="true" />
-          <div>
-            <h1>面试工作台</h1>
-            <p className={`session-state state-${status}${isPaused ? " state-paused" : ""}`}>
-              {statusLabel(status, isPaused)}
-            </p>
-          </div>
+      <nav className="app-rail" aria-label="工作台导航">
+        <a className="rail-brand" href="#workspace" title="面试工作台" aria-label="面试工作台">
+          <img src="/favicon.png" alt="" />
+        </a>
+        <div className="rail-navigation">
+          <a className="rail-action selected" href="#workspace" aria-current="page">
+            <PanelsTopLeft size={20} /><span>工作台</span>
+          </a>
+          <button className="rail-action" disabled={!canManageWorkbench} onClick={() => setCalendarOpen(true)} title="预览面试安排">
+            <CalendarDays size={20} /><span>日历</span>
+          </button>
+          <button className="rail-action" disabled={!canManageWorkbench} onClick={() => setSessionLibraryOpen(true)} title="浏览和筛选面试流程">
+            <ListFilter size={20} /><span>流程库</span>
+          </button>
+          <button className="rail-action" disabled={!canManageWorkbench} onClick={() => openInterviewForm("create-application")} title="新建面试流程">
+            <Plus size={20} /><span>新建</span>
+          </button>
         </div>
-
+        <button className="rail-action rail-settings" disabled={!canManageWorkbench} onClick={openProviderSettings} title="配置语音识别和大模型">
+          <Settings size={20} /><span>配置</span>
+          {health && (!health.asrConfigured || !health.llmConfigured) ? <i className="rail-warning" /> : null}
+        </button>
+      </nav>
+      <div className="app-content">
+      <header className="topbar">
         <section className="active-session-summary" aria-label="当前面试流程">
-          <div className="active-session-name">
-            {hasActiveInterview ? interviewName || "未命名候选人" : "尚无面试流程"}
-          </div>
+          <div className="session-breadcrumb">面试 <span>/</span> {hasActiveInterview ? roundLabelFor(activeInterview) : "工作台"}</div>
+          <h1 className="active-session-name">
+            {hasActiveInterview ? interviewName || "未命名候选人" : "面试工作台"}
+          </h1>
           {hasActiveInterview ? <div className="active-session-meta">
             <span className="session-role">
               <BriefcaseBusiness size={14} />
               {jdDraftName || "未设置岗位"}
             </span>
-            <div className="status-picker">
-              <button
-                className={`session-status status-picker-trigger ${interviewStatusTone(
-                  interviewStatus,
-                  store.statusColors,
-                )}`}
-                disabled={!canSwitchInterview}
-                onClick={() => setStatusPickerOpen((open) => !open)}
-                title="修改应聘流程状态"
-              >
-                {interviewStatus || DEFAULT_APPLICATION_STATUS}
-              </button>
-              {statusPickerOpen ? (
-                <div className="status-picker-popover">
-                  <div className="status-picker-options">
-                    {APPLICATION_STATUS_PRESET_VALUES.map((statusOption) => (
-                      <button
-                        className={`session-status ${interviewStatusTone(
-                          statusOption,
-                          store.statusColors,
-                        )} ${
-                          statusOption === interviewStatus ? "selected" : ""
-                        }`}
-                        key={statusOption}
-                        onClick={() => applyActiveApplicationStatus(statusOption)}
-                        type="button"
-                      >
-                        {statusOption}
-                      </button>
-                    ))}
-                    {!APPLICATION_STATUS_PRESET_VALUES.includes(interviewStatus) ? (
-                      <span className="status-picker-group-label">
-                        {isRetiredApplicationStatus(interviewStatus)
-                          ? `当前历史状态：${interviewStatus}（仅保留显示）`
-                          : `当前自定义状态：${interviewStatus}`}
-                      </span>
-                    ) : null}
-                  </div>
-                  <form
-                    className="status-picker-custom"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      applyActiveApplicationStatus(customStatusDraft, { keepPickerOpen: true });
-                    }}
-                  >
-                    <input
-                      aria-label="自定义流程状态"
-                      maxLength={24}
-                      onChange={(event) => setCustomStatusDraft(event.target.value)}
-                      placeholder="自定义状态"
-                      value={customStatusDraft}
-                    />
-                    <button
-                      aria-label="添加自定义流程状态"
-                      className="icon-button"
-                      disabled={!customStatusDraft.trim()}
-                      title="添加并使用"
-                      type="submit"
-                    >
-                      <Plus size={15} />
-                    </button>
-                  </form>
-                  <div className="status-color-field">
-                    <span>标签颜色</span>
-                    <div className="status-color-swatches" role="group" aria-label="标签颜色">
-                      {STATUS_COLOR_OPTIONS.map((option) => (
-                        <button
-                          aria-label={option.label}
-                          aria-pressed={
-                            statusColorFor(interviewStatus, store.statusColors) === option.value
-                          }
-                          className={`status-color-swatch color-${option.value}`}
-                          key={option.value}
-                          onClick={() => applyStatusColor(option.value)}
-                          title={option.label}
-                          type="button"
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-            </div>
+            <ApplicationStatusPicker value={interviewStatus} options={statusOptions} colors={store.statusColors}
+              disabled={!canSwitchInterview} open={statusPickerOpen} onOpenChange={setStatusPickerOpen}
+              draft={customStatusDraft} onDraftChange={setCustomStatusDraft} onSelect={applyActiveApplicationStatus} onColorChange={applyStatusColor} />
             <span className="current-round-label">{roundLabelFor(activeInterview)}</span>
             <span className="session-time">
               <CalendarClock size={14} />
@@ -1913,40 +1721,9 @@ function App() {
         </section>
 
         <div className="management-actions">
-          <StatusPill health={health} />
-          <button
-            disabled={!canManageWorkbench}
-            onClick={openProviderSettings}
-            title="配置语音识别和大模型"
-          >
-            <Settings size={17} />
-            配置
-          </button>
-          <button
-            disabled={!canManageWorkbench}
-            onClick={() => setCalendarOpen(true)}
-            title="预览面试安排"
-          >
-            <CalendarDays size={17} />
-            日历
-          </button>
-          <button
-            disabled={!canManageWorkbench}
-            onClick={() => setSessionLibraryOpen(true)}
-            title="浏览和筛选面试流程"
-          >
-            <ListFilter size={17} />
-            流程库
-          </button>
-          <button
-            className="primary"
-            disabled={!canManageWorkbench}
-            onClick={() => openInterviewForm("create-application")}
-            title="新建面试流程"
-          >
-            <Plus size={17} />
-            新建
-          </button>
+          <p className={`session-state state-${status}${isPaused ? " state-paused" : ""}`}>
+            {statusLabel(status, isPaused)}
+          </p>
           <div className="session-menu">
             <button
               className="icon-button"
@@ -2004,46 +1781,26 @@ function App() {
               </div>
             ) : null}
           </div>
-          <div className="audio-source-segmented" aria-label="收音方式" role="group">
-            <button
-              aria-pressed={audioSourceMode === AUDIO_SOURCE_MICROPHONE}
-              className={audioSourceMode === AUDIO_SOURCE_MICROPHONE ? "selected" : ""}
-              disabled={!canSwitchInterview}
-              onClick={() => {
-                setAudioSourceMode(AUDIO_SOURCE_MICROPHONE);
-                saveAudioSourceMode(AUDIO_SOURCE_MICROPHONE);
-              }}
-              title="只采集当前麦克风"
-              type="button"
-            >
-              <Mic size={15} />
-              麦克风
-            </button>
-            <button
-              aria-pressed={audioSourceMode === AUDIO_SOURCE_MEETING}
-              className={audioSourceMode === AUDIO_SOURCE_MEETING ? "selected" : ""}
-              disabled={!canSwitchInterview}
-              onClick={() => {
-                setAudioSourceMode(AUDIO_SOURCE_MEETING);
-                saveAudioSourceMode(AUDIO_SOURCE_MEETING);
-              }}
-              title="同时采集麦克风和腾讯会议等桌面应用声音"
-              type="button"
-            >
-              <MonitorSpeaker size={15} />
-              会议声音
-            </button>
-          </div>
-          <span className="toolbar-separator" />
+          <label className="audio-source-select">
+            {audioSourceMode === AUDIO_SOURCE_MEETING ? <MonitorSpeaker size={16} /> : <Mic size={16} />}
+            <select aria-label="收音方式" value={audioSourceMode} disabled={!canSwitchInterview}
+              onChange={(event) => {
+                setAudioSourceMode(event.target.value);
+                saveAudioSourceMode(event.target.value);
+              }}>
+              <option value={AUDIO_SOURCE_MICROPHONE}>麦克风</option>
+              <option value={AUDIO_SOURCE_MEETING}>麦克风 + 会议声音</option>
+            </select>
+          </label>
           {status === "idle" || status === "stopped" || status === "error" ? (
             <button
-              className="primary"
+              className="session-start primary"
               disabled={!canSwitchInterview}
               onClick={startInterview}
               title="开始面试"
             >
               <Play size={17} />
-              开始
+              开始面试
             </button>
           ) : (
             <>
@@ -2053,7 +1810,7 @@ function App() {
               </button>
               <button className="stop-action" onClick={stopInterview} title="结束面试">
                 <Square size={16} />
-                结束
+                结束面试
               </button>
             </>
           )}
@@ -2163,7 +1920,7 @@ function App() {
           onSelectJd={selectFormJd}
           onSubmit={submitInterviewForm}
           roundStatusOptions={ROUND_STATUS_OPTIONS}
-          statusOptions={APPLICATION_STATUS_PRESET_VALUES}
+          statusOptions={statusOptions}
           submitting={interviewFormSubmitting}
         />
       ) : null}
@@ -2184,216 +1941,18 @@ function App() {
         />
       ) : null}
 
-      {hasActiveInterview ? <section
-        className="workspace interview-workspace"
-        ref={workspaceRef}
-        style={{ "--resume-pane-width": `${workspaceSplit}%` }}
-      >
-        <section className={`resume-pane pane ${resumeFocusMode ? "resume-focus-mode" : ""}`}>
-          <PanelTitle icon={<FileText size={18} />} title="简历预览">
-            <input
-              accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-              className="file-input"
-              onChange={handleActiveResumeReplacement}
-              ref={resumeReplaceInputRef}
-              type="file"
-            />
-            <button
-              className="resume-replace-action"
-              disabled={!canSwitchInterview || resumeReplacing}
-              onClick={() => resumeReplaceInputRef.current?.click()}
-              title={resumeFile ? "更换当前简历附件" : "添加简历附件"}
-              type="button"
-            >
-              <RefreshCw size={15} />
-              {resumeReplacing ? "处理中" : resumeFile ? "更换" : "添加"}
-            </button>
-            <button
-              className={`resume-mark-action ${markMode ? "active" : ""}`}
-              disabled={!canMarkResume}
-              onClick={() => {
-                setNoteDraft(null);
-                setNoteEditor(null);
-                setMarkMode((value) => !value);
-              }}
-              title="在简历上标记备注位置"
-            >
-              <MousePointer2 size={16} />
-              {markMode ? "点击位置" : "标记"}
-            </button>
-            <button
-              className={`icon-button notes-toggle ${notesView !== "hidden" ? "selected-control" : ""}`}
-              disabled={!resumeFile}
-              onClick={() => setNotesView((view) => (view === "hidden" ? "sidebar" : "hidden"))}
-              title="查看简历备注"
-              aria-label="查看简历备注"
-            >
-              <StickyNote size={16} />
-              {resumeNotes.length ? <span className="control-badge">{resumeNotes.length}</span> : null}
-            </button>
-            <span className="toolbar-separator" />
-            <button
-              className="icon-button"
-              disabled={!resumeFile || resumeZoom <= 0.5}
-              onClick={() => changeResumeZoom(-0.1)}
-              title="缩小简历"
-              aria-label="缩小简历"
-            >
-              <ZoomOut size={16} />
-            </button>
-            <button
-              className="zoom-value"
-              disabled={!resumeFile}
-              onClick={() => setResumeZoom(1)}
-              title="恢复适合宽度"
-            >
-              {Math.round(resumeZoom * 100)}%
-            </button>
-            <button
-              className="icon-button"
-              disabled={!resumeFile || resumeZoom >= 2}
-              onClick={() => changeResumeZoom(0.1)}
-              title="放大简历"
-              aria-label="放大简历"
-            >
-              <ZoomIn size={16} />
-            </button>
-            <button
-              className="icon-button"
-              disabled={!resumeFile}
-              onClick={() => setResumeFocusMode((focused) => !focused)}
-              title={resumeFocusMode ? "退出简历专注模式" : "最大化简历"}
-              aria-label={resumeFocusMode ? "退出简历专注模式" : "最大化简历"}
-            >
-              {resumeFocusMode ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-            </button>
-          </PanelTitle>
+      {hasActiveInterview ? <div className="workspace-frame">
+      <SplitPane id="workspace" preferenceKey="workspaceSplit" className="workspace interview-workspace"
+        label="调整简历与分析区域大小" defaultSize={61} minPrimary={320} minSecondary={300} stackAt={760}>
+        <ResumePane key={`${activeInterviewId}:${resumeFile?.id || resumeFile?.name || "empty"}`}
+          file={resumeFile} notes={resumeNotes} previewError={resumePreviewError}
+          replacing={resumeReplacing} canReplace={canSwitchInterview} onReplace={handleActiveResumeReplacement}
+          onUpsertNote={saveResumeAnnotation} onDeleteNote={deleteResumeAnnotation} onRetryNotes={retryResumeAnnotations}
+          saveState={annotationSaveStates[activeApplication.id] || "saved"} />
 
-          <div className={`resume-preview-wrap notes-${notesView}`}>
-            <div className="resume-document-area">
-              {resumeFile ? (
-                <div className="resume-filebar">
-                  <span>{resumeFile.name}</span>
-                  <span>{formatFileSize(resumeFile.size)}</span>
-                </div>
-              ) : null}
-
-              <div className="resume-preview-surface">
-                <div className="resume-preview-scroller" ref={resumeScrollerRef}>
-                  {resumeFile ? (
-                    <ResumeDocument
-                      file={resumeFile}
-                      markMode={markMode}
-                      noteDraft={noteDraft}
-                      noteEditor={noteEditor}
-                      notes={resumeNotes}
-                      onCancelDraft={() => setNoteDraft(null)}
-                      onCloseEditor={() => setNoteEditor(null)}
-                      onDeleteNote={deleteResumeNote}
-                      onDraftChange={(text) =>
-                        setNoteDraft((draft) => (draft ? { ...draft, text } : draft))
-                      }
-                      onEditorChange={(text) =>
-                        setNoteEditor((editor) => (editor ? { ...editor, text } : editor))
-                      }
-                      onFocusNote={focusResumeNote}
-                      onMark={handleResumeMark}
-                      onSaveDraft={saveResumeNote}
-                      onSaveEditor={saveNoteEditor}
-                      selectedNoteId={selectedNoteId}
-                      previewError={resumePreviewError}
-                      zoom={resumeZoom}
-                    />
-                  ) : (
-                    <div className="resume-empty">
-                      <FileText size={30} />
-                      <p>请在编辑资料中添加 PDF 或 Word 简历。</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {notesView !== "hidden" ? <aside className="resume-notes-list">
-              <div className="resume-notes-head">
-                <div>
-                  <StickyNote size={15} />
-                  <span>简历备注</span>
-                  <span className="notes-count">{resumeNotes.length}</span>
-                </div>
-                <div className="resume-notes-actions">
-                  <button
-                    className="icon-button"
-                    onClick={() => setNotesView((view) => (view === "focus" ? "sidebar" : "focus"))}
-                    title={notesView === "focus" ? "恢复文档与备注" : "最大化备注"}
-                    aria-label={notesView === "focus" ? "恢复文档与备注" : "最大化备注"}
-                  >
-                    {notesView === "focus" ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-                  </button>
-                  <button
-                    className="icon-button"
-                    onClick={() => setNotesView("hidden")}
-                    title="关闭备注"
-                    aria-label="关闭备注"
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-              </div>
-              {resumeNotes.length ? (
-                resumeNotes.map((note) => (
-                  <div
-                    className={`resume-note-item ${
-                      selectedNoteId === note.id ? "selected" : ""
-                    }`}
-                    key={note.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => focusResumeNote(note)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        focusResumeNote(note);
-                      }
-                    }}
-                  >
-                    <StickyNote size={15} />
-                    <div className="resume-note-body">
-                      <p>{note.text}</p>
-                      <span>
-                        {formatResumeNoteLocation(note)}
-                      </span>
-                    </div>
-                    <button
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        deleteResumeNote(note.id);
-                      }}
-                      title="删除备注"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <div className="notes-empty">暂无备注</div>
-              )}
-            </aside> : null}
-          </div>
-        </section>
-
-        <div
-          className="workspace-splitter"
-          role="separator"
-          aria-label="调整简历与分析区域宽度"
-          aria-orientation="vertical"
-          onPointerDown={startWorkspaceResize}
-        >
-          <span />
-        </div>
-
-        <section className="assist-pane">
-          <section className="cards pane">
+        <SplitPane id="assistant-panels" preferenceKey="assistSplit" className="assist-pane" direction="vertical"
+          label="调整 AI 追问与实时转录高度" defaultSize={54} minPrimary={150} minSecondary={150}>
+          <section className={`cards pane ${focusedPanel === "analysis" ? "panel-focus-mode" : ""}`}>
             <PanelTitle icon={<WandSparkles size={18} />} title="AI 追问">
               <button
                 className="followup-action"
@@ -2408,13 +1967,19 @@ function App() {
                 }
               >
                 <WandSparkles size={15} />
-                立即追问
+                <span className="tool-label">{currentSegmentPending ? "分析中" : "立即追问"}</span>
+              </button>
+              <button className="icon-button" onClick={() => setFocusedPanel((value) => value === "analysis" ? "" : "analysis")}
+                aria-label={focusedPanel === "analysis" ? "退出追问专注模式" : "最大化 AI 追问"} title={focusedPanel === "analysis" ? "退出追问专注模式" : "最大化 AI 追问"}>
+                {focusedPanel === "analysis" ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
               </button>
             </PanelTitle>
             <AnalysisCardList cards={cards} onRetry={handleRetryCard} />
           </section>
 
           <TranscriptPanel
+            focused={focusedPanel === "transcript"}
+            onToggleFocus={() => setFocusedPanel((value) => value === "transcript" ? "" : "transcript")}
             lastProcessedLineCount={lastProcessedLineCount}
             lines={lines}
             onSpeakerLabelChange={handleSpeakerLabelChange}
@@ -2423,8 +1988,10 @@ function App() {
             speakerEditorOpen={speakerEditorOpen}
             speakerLabels={speakerLabels}
           />
-        </section>
-      </section> : null}
+        </SplitPane>
+      </SplitPane>
+      </div> : null}
+      </div>
     </main>
   );
 }
@@ -2514,16 +2081,6 @@ function extractMarkdownTitle(markdown) {
   return markdown.split(/\r?\n/).find(Boolean)?.trim().slice(0, 36) || "";
 }
 
-function formatResumeNoteLocation(note) {
-  if (note.coordinateMode === "page" && note.pageNumber) {
-    return `第 ${note.pageNumber} 页 · 纵向 ${Math.round(note.y * 100)}%`;
-  }
-  if (note.coordinateMode === "document") {
-    return `文档位置 · ${Math.round(note.y * 100)}%`;
-  }
-  return `原位置 · ${Math.round(note.y * 100)}%`;
-}
-
 async function syncInterviewToSystemCalendar(interview) {
   try {
     return await requestJson(
@@ -2550,15 +2107,6 @@ function downloadInterviewCalendar(interview) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function loadWorkspaceSplit() {
-  const preferences = readUiPreferences();
-  return clampNumber(Number(preferences.workspaceSplit) || 56, 38, 72);
-}
-
-function saveWorkspaceSplit(workspaceSplit) {
-  saveUiPreferences({ workspaceSplit: clampNumber(workspaceSplit, 38, 72) });
-}
-
 function loadAudioSourceMode() {
   const mode = readUiPreferences().audioSourceMode;
   return mode === AUDIO_SOURCE_MEETING ? AUDIO_SOURCE_MEETING : AUDIO_SOURCE_MICROPHONE;
@@ -2566,22 +2114,6 @@ function loadAudioSourceMode() {
 
 function saveAudioSourceMode(audioSourceMode) {
   saveUiPreferences({ audioSourceMode });
-}
-
-function readUiPreferences() {
-  try {
-    return JSON.parse(localStorage.getItem(UI_PREF_KEY) || "{}") || {};
-  } catch {
-    return {};
-  }
-}
-
-function saveUiPreferences(patch) {
-  try {
-    localStorage.setItem(UI_PREF_KEY, JSON.stringify({ ...readUiPreferences(), ...patch }));
-  } catch {
-    // UI preferences are optional and do not affect interview data.
-  }
 }
 
 function toDatetimeLocalValue(value) {

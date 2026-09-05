@@ -11,3 +11,18 @@ node_modules/
 private/
 *-面试准备.md
 火山文档.md
+# Only public project documents belong at the package root.
+/*.md
+!/README.md
+!/ARCHITECTURE.md
+!/CONTRIBUTING.md
+!/PRIVACY.md
+!/RELEASE_CHECKLIST.md
+!/SECURITY.md
+/docs/design/
+/docs/assets/logo-candidates/
+/skills/*
+!/skills/interview-create-session/
+!/skills/interview-preparation/
+!/skills/interview-resume-screening/
+!/skills/interview-summary/

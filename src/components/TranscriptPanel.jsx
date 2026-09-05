@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Mic, Pencil } from "lucide-react";
+import { Maximize2, Mic, Minimize2, Pencil } from "lucide-react";
 import { PanelTitle, TranscriptLine } from "./WorkbenchPrimitives.jsx";
 
 export function TranscriptPanel({
+  focused,
+  onToggleFocus,
   lastProcessedLineCount,
   lines,
   onSpeakerLabelChange,
@@ -23,7 +25,7 @@ export function TranscriptPanel({
   }, [lines]);
 
   return (
-    <section className="transcript pane compact-transcript">
+    <section className={`transcript pane compact-transcript ${focused ? "panel-focus-mode" : ""}`}>
       <PanelTitle icon={<Mic size={18} />} title="实时转录">
         {seenSpeakers.length ? (
           <button
@@ -35,6 +37,10 @@ export function TranscriptPanel({
             <Pencil size={16} />
           </button>
         ) : null}
+        <button className="icon-button" onClick={onToggleFocus}
+          aria-label={focused ? "退出转录专注模式" : "最大化实时转录"} title={focused ? "退出转录专注模式" : "最大化实时转录"}>
+          {focused ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+        </button>
       </PanelTitle>
       {speakerEditorOpen ? (
         <div className="speaker-inline-editor">
@@ -52,7 +58,7 @@ export function TranscriptPanel({
       ) : null}
       <div className="transcript-list">
         {lines.length === 0 && !partialText ? (
-          <div className="empty">等待转录</div>
+          <div className="empty">开始面试后，转录会显示在这里</div>
         ) : null}
         {partialText ? (
           <div className="line partial">

@@ -11,11 +11,11 @@ function cardStatusLabel(card) {
     queued: "排队中",
     running: "处理中",
     retrying: "重试中",
-    done: "Markdown",
+    done: "追问建议",
     error: "失败",
     loading: "处理中",
   };
-  return labels[card.status] || "Markdown";
+  return labels[card.status] || "追问建议";
 }
 
 const AnalysisCard = memo(function AnalysisCard({ card, onRetry }) {
@@ -49,7 +49,7 @@ const AnalysisCard = memo(function AnalysisCard({ card, onRetry }) {
 export function AnalysisCardList({ cards, onRetry }) {
   return (
     <div className="cards-list">
-      {cards.length === 0 ? <div className="empty">等待第一次处理</div> : null}
+      {cards.length === 0 ? <div className="empty">有新转录后，点击「立即追问」生成建议</div> : null}
       {cards.map((card) => (
         <AnalysisCard card={card} key={card.id} onRetry={onRetry} />
       ))}

@@ -4,6 +4,7 @@ import { FileText } from "lucide-react";
 import { getApiHeaders } from "../../api.js";
 import { dataUrlToUint8Array, resumeFileSource } from "../../lib/resume-files.js";
 import { ResumeMarkerLayer } from "./ResumeMarkerLayer.jsx";
+import { handleDocumentPointerUp } from "../../lib/resume-annotations.js";
 
 export function PdfPreview({ file, markerProps, zoom }) {
   const containerRef = useRef(null);
@@ -19,7 +20,7 @@ export function PdfPreview({ file, markerProps, zoom }) {
     function updateWidth() {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        setAvailableWidth(Math.max(260, node.clientWidth));
+        setAvailableWidth(Math.max(1, node.clientWidth));
       });
     }
 
@@ -110,22 +111,35 @@ export function PdfPreview({ file, markerProps, zoom }) {
 
 export function PdfPageCanvas({ page, availableWidth, markerProps, zoom }) {
   const canvasRef = useRef(null);
+  const textRef = useRef(null);
 
   useEffect(() => {
     if (!page || !availableWidth || !canvasRef.current) return undefined;
 
     const baseViewport = page.getViewport({ scale: 1 });
-    const targetWidth = Math.max(260, (availableWidth - 34) * zoom);
+    const targetWidth = Math.max(1, (availableWidth - 36) * zoom);
     const scale = targetWidth / baseViewport.width;
     const viewport = page.getViewport({ scale });
     const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
     const canvas = canvasRef.current;
+    const textContainer = textRef.current;
+    let textLayer = null;
+    let cancelled = false;
     const context = canvas.getContext("2d");
 
     canvas.width = Math.floor(viewport.width * pixelRatio);
     canvas.height = Math.floor(viewport.height * pixelRatio);
-    canvas.style.width = `${Math.floor(viewport.width)}px`;
-    canvas.style.height = `${Math.floor(viewport.height)}px`;
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    textContainer.style.setProperty("--total-scale-factor", viewport.scale);
+    textContainer.replaceChildren();
+    Promise.all([import("pdfjs-dist"), page.getTextContent()]).then(([{ TextLayer }, textContent]) => {
+      if (cancelled) return;
+      textLayer = new TextLayer({ textContentSource: textContent, container: textContainer, viewport });
+      return textLayer.render();
+    }).catch((error) => {
+      if (!cancelled) console.warn("[pdf-text-layer]", error.message);
+    });
 
     const renderContext = {
       canvasContext: context,
@@ -139,13 +153,18 @@ export function PdfPageCanvas({ page, availableWidth, markerProps, zoom }) {
     renderTask.promise.catch(() => {});
 
     return () => {
+      cancelled = true;
+      textLayer?.cancel();
+      textContainer.replaceChildren();
       renderTask.cancel();
     };
   }, [availableWidth, page, zoom]);
 
   return (
-    <div className="pdf-page">
+    <div className={`pdf-page ${markerProps.markMode ? "annotation-marking" : ""}`}
+      onPointerUp={(event) => handleDocumentPointerUp(event, markerProps, "page", page.pageNumber)}>
       <canvas aria-label={`PDF 第 ${page.pageNumber} 页`} ref={canvasRef} />
+      <div className="pdf-text-layer" ref={textRef} />
       <ResumeMarkerLayer
         {...markerProps}
         coordinateMode="page"
