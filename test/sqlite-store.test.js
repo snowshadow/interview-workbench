@@ -535,7 +535,7 @@ test("applications own shared fields while rounds keep independent lifecycle dat
     assert.equal(store.getApplication("application-1").resumeFile.id, resume.id);
 
     const snapshot = store.getStore();
-    assert.equal(snapshot.schemaVersion, 7);
+    assert.equal(snapshot.schemaVersion, 8);
     assert.equal(snapshot.applications.length, 1);
     assert.equal(snapshot.interviews.length, 2);
     const exported = store.exportStore();
@@ -952,7 +952,7 @@ test("schema v5 migration adds empty role short names without inferring them", (
   const migrated = new SqliteStore(config, silentLogger);
   try {
     const snapshot = migrated.getStore();
-    assert.equal(snapshot.schemaVersion, 7);
+    assert.equal(snapshot.schemaVersion, 8);
     assert.equal(snapshot.jdLibrary[0].name, "量化策略研究负责人");
     assert.equal(snapshot.jdLibrary[0].shortName, "");
     assert.equal(snapshot.applications[0].jdDraftName, "量化策略研究负责人");
@@ -1023,7 +1023,7 @@ test("schema v4 migration backs up once and never merges same-name interviews", 
   const store = new SqliteStore(config, silentLogger);
   try {
     const snapshot = store.getStore();
-    assert.equal(snapshot.schemaVersion, 7);
+    assert.equal(snapshot.schemaVersion, 8);
     assert.deepEqual(snapshot.applications.map((application) => application.id).sort(), ["legacy-1", "legacy-2"]);
     assert.equal(store.getApplicationContext("legacy-1").rounds[0].id, "legacy-1");
     assert.equal(store.getApplicationContext("legacy-2").rounds[0].id, "legacy-2");
@@ -1046,7 +1046,7 @@ test("schema v4 migration backs up once and never merges same-name interviews", 
     );
     assert.equal(store.getInterview("legacy-1").durationMinutes, 60);
     const backups = fs.readdirSync(config.backupDir)
-      .filter((name) => name.startsWith("workbench-pre-v7-") && name.endsWith(".sqlite"));
+      .filter((name) => name.startsWith("workbench-pre-v8-") && name.endsWith(".sqlite"));
     assert.equal(backups.length, 1);
     assert.ok(fs.statSync(path.join(config.backupDir, backups[0])).size > 0);
   } finally {

@@ -1,0 +1,53 @@
+.interview-assistant { display: flex; flex-direction: column; min-height: 0; position: relative; container: assistant / inline-size; overflow: visible; background: var(--surface); }
+.interview-assistant.panel-focus-mode { position: fixed; }
+.interview-assistant .panel-title { border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--surface); }
+.assistant-statusbar { flex-shrink: 0; padding: 8px 15px; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; background: var(--surface-subtle); color: var(--text-secondary); border-bottom: 1px solid var(--hairline); font-size: 11px; }
+.assistant-statusbar .assistant-auto { display: inline-flex; align-items: center; gap: 6px; border: 0; padding: 0; min-height: 24px; font-size: 11px; background: transparent; box-shadow: none; color: var(--text-secondary); }
+.assistant-auto-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text-tertiary); }
+.assistant-auto-dot.enabled { background: var(--success); }
+.assistant-navigation { position: relative; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; padding: 8px 15px; border-bottom: 1px solid var(--hairline); }
+.assistant-navigation .assistant-directory-toggle { padding: 0; min-height: 27px; border: 0; box-shadow: none; font-size: 12px; color: var(--accent); background: transparent; }
+.assistant-coverage { color: var(--text-secondary); font-size: 11px; }
+.assistant-directory { position: absolute; top: calc(100% + 4px); left: 10px; right: 10px; width: auto; max-height: min(430px, 60dvh); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 7px; box-shadow: var(--shadow-popover); z-index: 12; }
+.assistant-directory-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 8px 8px; font-size: 12px; border-bottom: 1px solid var(--hairline); }
+.assistant-directory-heading button { padding: 3px; border: 0; background: transparent; box-shadow: none; }
+.assistant-directory .assistant-directory-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); width: 100%; text-align: left; align-items: start; gap: 6px; padding: 11px 8px; border: 0; background: transparent; box-shadow: none; border-radius: 6px; font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.assistant-directory .assistant-directory-item.selected { background: var(--accent-soft); color: var(--accent); }
+.assistant-directory-item small { display: block; font-size: 11px; font-weight: 400; color: var(--text-secondary); margin-top: 4px; }
+.assistant-content { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; padding: 17px 18px; scrollbar-gutter: stable; border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+.assistant-topic h3 { margin: 0; font-size: 16px; line-height: 1.65; letter-spacing: 0; overflow-wrap: anywhere; color: var(--text); }
+.assistant-topic-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-secondary); margin-top: 7px; }
+.assistant-topic-status { color: var(--text-secondary); font-size: 11px; font-weight: 400; }
+.assistant-topic-status.answering, .assistant-topic-status.partial { color: var(--warning); background: var(--warning-soft); padding: 1px 6px; border-radius: 4px; }
+.assistant-topic-status.covered { color: var(--success); }
+.assistant-topic-summary { font-size: 12px; color: var(--text-secondary); line-height: 1.85; margin: 13px 0 17px; overflow-wrap: anywhere; }
+.assistant-empty-topic { font-size: 13px; color: var(--text-secondary); padding: 20px 0; }
+.assistant-qa { border-top: 1px solid var(--hairline); padding: 14px 0; }
+.assistant-qa .assistant-question { display: grid; grid-template-columns: 15px minmax(0, 1fr); gap: 7px; width: 100%; text-align: left; padding: 0; border: 0; background: transparent; box-shadow: none; align-items: start; color: var(--text); }
+.assistant-question > svg { margin-top: 3px; color: var(--text-secondary); }
+.assistant-question > svg.closed { transform: rotate(-90deg); }
+.assistant-question-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; font-weight: 400; color: var(--text-secondary); margin-bottom: 5px; }
+.assistant-question-text { display: block; font-size: 13px; font-weight: 500; line-height: 1.85; overflow-wrap: anywhere; }
+.assistant-answer-teaser { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; color: var(--text-secondary); line-height: 1.85; font-weight: 400; margin-top: 6px; }
+.assistant-answer { padding: 10px 0 0 22px; font-size: 13px; line-height: 1.85; overflow-wrap: anywhere; }
+.assistant-answer p { margin: 5px 0; }
+.assistant-answer-label { font-size: 11px; color: var(--text-secondary); }
+.assistant-answer .assistant-gap { margin-top: 12px; padding-left: 10px; border-left: 2px solid var(--warning); color: var(--warning); font-size: 12px; }
+.assistant-answer .assistant-evidence-toggle { margin-top: 5px; padding: 0; min-height: 24px; border: 0; background: transparent; box-shadow: none; color: var(--accent); font-size: 11px; }
+.assistant-evidence { padding: 6px 10px; margin-top: 6px; border-left: 2px solid var(--border); background: var(--surface-subtle); }
+.assistant-evidence .line { display: block; padding: 8px 0; }
+.assistant-evidence .line-meta { flex-direction: row; justify-content: space-between; margin-bottom: 4px; }
+.assistant-evidence .line-text { font-size: 12px; }
+.assistant-followup { padding: 12px 14px; margin-top: 14px; background: var(--accent-soft); border: 1px solid var(--border); border-radius: 8px; }
+.assistant-followup-label { font-size: 11px; color: var(--accent); }
+.assistant-followup p { font-size: 13px; line-height: 1.85; margin: 7px 0 0; overflow-wrap: anywhere; }
+.assistant-pending-topics { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hairline); font-size: 11px; color: var(--text-secondary); }
+.assistant-pending-topics button, .assistant-topic .assistant-next-topic { display: block; text-align: left; border: 0; background: transparent; box-shadow: none; font-size: 12px; padding: 7px 0; line-height: 1.8; overflow-wrap: anywhere; white-space: normal; }
+.assistant-topic .assistant-next-topic { color: var(--accent); margin-top: 12px; }
+.assistant-error { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-shrink: 0; font-size: 12px; color: var(--danger); padding: 9px 15px; overflow-wrap: anywhere; }
+.assistant-error button { flex-shrink: 0; font-size: 11px; min-height: 26px; }
+.assistant-legacy { border-top: 1px solid var(--hairline); padding-top: 14px; margin-top: 20px; }
+.assistant-legacy > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.assistant-legacy .cards-list { overflow: visible; padding: 15px 0; }
+@container assistant (width < 360px) { .interview-assistant .panel-title { padding-inline: 10px; flex-wrap: wrap; } .assistant-content { padding: 14px 12px; } .assistant-statusbar, .assistant-navigation { padding-inline: 11px; } .assistant-topic h3 { font-size: 15px; } }
+@media (pointer: coarse) { .assistant-navigation button, .assistant-statusbar .assistant-auto, .assistant-evidence-toggle { min-height: 36px; } }

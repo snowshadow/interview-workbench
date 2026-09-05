@@ -8,8 +8,6 @@ import {
   Download,
   Ellipsis,
   ListFilter,
-  Maximize2,
-  Minimize2,
   MonitorSpeaker,
   Mic,
   PanelsTopLeft,
@@ -23,16 +21,17 @@ import {
   X,
   Trash2,
   Upload,
-  WandSparkles,
 } from "lucide-react";
 import "./styles.css";
 import "./workbench.css";
 import { InterviewCalendarDialog } from "./components/InterviewCalendarDialog.jsx";
 import { SessionLibraryDialog } from "./components/SessionLibraryDialog.jsx";
 import { ApplicationStatusPicker } from "./components/ApplicationStatusPicker.jsx";
-import { PanelTitle } from "./components/WorkbenchPrimitives.jsx";
 import { TranscriptPanel } from "./components/TranscriptPanel.jsx";
-import { AnalysisCardList, isPendingAnalyzeCard } from "./components/AnalysisCardList.jsx";
+import { isPendingAnalyzeCard } from "./components/AnalysisCardList.jsx";
+import { InterviewAssistantPanel } from "./components/InterviewAssistantPanel.jsx";
+import { useInterviewAssistant } from "./lib/use-interview-assistant.js";
+import { assistantMarkdown, createTranscriptWriteQueue } from "./lib/assistant-state.js";
 import { InterviewFormDialog } from "./components/dialogs/InterviewFormDialog.jsx";
 import {
   ProviderSettingsDialog,
@@ -161,7 +160,6 @@ function App() {
   const [accessTokenDraft, setAccessTokenDraft] = useState("");
   const [status, setStatus] = useState("idle");
   const [isPaused, setIsPaused] = useState(false);
-  const [hasPartialText, setHasPartialText] = useState(false);
   const [error, setError] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [sessionLibraryOpen, setSessionLibraryOpen] = useState(false);
@@ -204,6 +202,12 @@ function App() {
   const retryAnalysisCardRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
+  const transcriptWritesRef = useRef(null);
+  const [assistantResetKey, setAssistantResetKey] = useState(0);
+  if (!transcriptWritesRef.current) transcriptWritesRef.current = createTranscriptWriteQueue((id, nextLines) =>
+    requestJson(`/api/interviews/${encodeURIComponent(id)}/lines`, {
+      method: "POST", body: JSON.stringify({ lines: nextLines }),
+    }));
 
   const activeInterview = useMemo(() => {
     return (
@@ -254,6 +258,14 @@ function App() {
     activeInterview.interviewStatus ||
     DEFAULT_APPLICATION_STATUS;
   const resumeNotes = Array.isArray(savedResumeNotes) ? savedResumeNotes : [];
+  const assistant = useInterviewAssistant({
+    interviewId: activeInterviewId,
+    enabled: storeReady && !authRequired,
+    recording: status === "recording" && !isPaused && Boolean(health?.llmConfigured),
+    lineCount: lines.length,
+    beforeRequest: (id) => transcriptWritesRef.current.flush(id),
+    resetKey: assistantResetKey,
+  });
 
   useEffect(() => {
     statusRef.current = status;
@@ -262,11 +274,6 @@ function App() {
   useEffect(() => {
     pausedRef.current = isPaused;
   }, [isPaused]);
-
-  useEffect(() => {
-    setHasPartialText(Boolean(partialTextBridge.get()));
-    return partialTextBridge.subscribe((text) => setHasPartialText(Boolean(text)));
-  }, [partialTextBridge]);
 
   useEffect(() => {
     retryAnalysisCardRef.current = retryAnalysisCard;
@@ -395,31 +402,6 @@ function App() {
       .join("\n")
       .trim();
   }, [lines, speakerLabels]);
-
-  const getCurrentSegmentText = useCallback(() => {
-    const freshLines = lines.slice(lastProcessedLineCount);
-    const body = freshLines
-      .map((line) => formatLineForPrompt(line, speakerLabels))
-      .join("\n")
-      .trim();
-    if (body) return body;
-    const partialText = partialTextBridge.get();
-    return partialText ? `正在识别：${partialText}` : "";
-  }, [lastProcessedLineCount, lines, partialTextBridge, speakerLabels]);
-  const currentSegmentText = useMemo(
-    () => getCurrentSegmentText(),
-    [getCurrentSegmentText, hasPartialText],
-  );
-  const currentSegmentPending = useMemo(
-    () =>
-      cards.some(
-        (card) =>
-          isPendingAnalyzeCard(card) &&
-          Number(card.segmentStart ?? card.snapshotLineCount ?? -1) === lastProcessedLineCount &&
-          Number(card.segmentEnd ?? card.snapshotLineCount ?? -1) === lines.length,
-      ),
-    [cards, lastProcessedLineCount, lines.length],
-  );
 
   const canManageWorkbench =
     storeReady && (status === "idle" || status === "stopped" || status === "error");
@@ -631,10 +613,7 @@ function App() {
 
   async function appendTranscriptLines(interviewId, nextLines) {
     try {
-      await requestJson(`/api/interviews/${encodeURIComponent(interviewId)}/lines`, {
-        method: "POST",
-        body: JSON.stringify({ lines: nextLines }),
-      });
+      await transcriptWritesRef.current.enqueue(interviewId, nextLines);
       setPersistError("");
     } catch {
       setPersistError("转录保存失败，请先导出 Markdown 兜底");
@@ -1269,7 +1248,9 @@ function App() {
   }
 
   function stopInterview() {
+    const hasTranscript = lines.length > 0 || Boolean(partialTextBridge.get().trim());
     commitPartialTranscript();
+    if (hasTranscript && assistant.autoEnabled && health?.llmConfigured) void assistant.request("summary");
     setStatus("stopped");
     setIsPaused(false);
     updateActiveInterview({ roundStatus: "已结束" });
@@ -1328,80 +1309,6 @@ function App() {
     partialTextBridge.set("");
   }
 
-  async function processNow() {
-    const transcriptSlice = getCurrentSegmentText().trim();
-    if (!transcriptSlice) {
-      setError("这一段还没有可处理的转录文本");
-      return;
-    }
-    if (currentSegmentPending) {
-      setError("当前转录片段已经在分析中");
-      return;
-    }
-
-    setError("");
-    const segmentStart = lastProcessedLineCount;
-    const snapshotLineCount = lines.length;
-    const pendingCard = {
-      id: safeId(),
-      createdAt: new Date().toISOString(),
-      status: "queued",
-      markdown: "已提交分析任务...",
-      transcriptSlice,
-      snapshotLineCount,
-      segmentStart,
-      segmentEnd: snapshotLineCount,
-      attempts: 0,
-    };
-    updateActiveInterview((interview) => ({
-      cards: [pendingCard, ...interview.cards],
-    }));
-
-    try {
-      const response = await apiFetch("/api/analyze-jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          interviewId: activeInterviewId,
-          cardId: pendingCard.id,
-          segmentStart,
-          segmentEnd: snapshotLineCount,
-          resumeMarkdown,
-          roleMarkdown,
-          transcriptSlice,
-          askedQuestions,
-          previousCards: cards.slice(0, 5).map((card) => summarizeCard(card.markdown)),
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "创建分析任务失败");
-
-      updateActiveInterview((interview) => ({
-        cards: interview.cards.map((card) =>
-          card.id === pendingCard.id && isPendingAnalyzeCard(card)
-            ? {
-                ...card,
-                jobId: data.id,
-                status: data.status,
-                attempts: data.attempts || 0,
-                markdown: analyzeJobPlaceholder(data),
-              }
-            : card,
-        ),
-      }));
-    } catch (err) {
-      const message = err.message || "创建分析任务失败";
-      setError(message);
-      updateActiveInterview((interview) => ({
-        cards: interview.cards.map((card) =>
-          card.id === pendingCard.id
-            ? { ...card, status: "error", markdown: message }
-            : card,
-        ),
-      }));
-    }
-  }
-
   async function retryAnalysisCard(card) {
     setError("");
     try {
@@ -1442,6 +1349,7 @@ function App() {
     setStore((prev) => ({
       ...prev,
       interviews: prev.interviews.map((interview) => {
+        if (job.interviewId ? interview.id !== job.interviewId : !interview.cards.some((card) => card.jobId === job.id)) return interview;
         let askedQuestions = interview.askedQuestions;
         const cards = interview.cards.map((card) => {
           if (card.jobId !== job.id) return card;
@@ -1525,6 +1433,9 @@ function App() {
       askedQuestions.length
         ? askedQuestions.map((item) => `- ${item}`).join("\n")
         : "暂无",
+      "",
+      "## 面中 AI 总结",
+      assistantMarkdown(assistant.state) || "尚未整理",
       "",
       "## AI 追问卡片",
       cards
@@ -1659,11 +1570,15 @@ function App() {
       setError("");
       try {
         const parsed = JSON.parse(await file.text());
+        // Finish retained writes before replacing the database, so a later
+        // manual request cannot replay pre-import transcript batches.
+        await transcriptWritesRef.current.flushAll();
         const data = await requestJson("/api/import", {
           method: "POST",
           body: JSON.stringify(parsed),
         });
         setStore(normalizeStore(data.store));
+        setAssistantResetKey((value) => value + 1);
       } catch (err) {
         setError(err.message || "导入完整备份失败");
       }
@@ -1943,7 +1858,7 @@ function App() {
 
       {hasActiveInterview ? <div className="workspace-frame">
       <SplitPane id="workspace" preferenceKey="workspaceSplit" className="workspace interview-workspace"
-        label="调整简历与分析区域大小" defaultSize={61} minPrimary={320} minSecondary={300} stackAt={760}>
+        label="调整简历与分析区域大小" defaultSize={42} minPrimary={320} minSecondary={300} stackAt={760}>
         <ResumePane key={`${activeInterviewId}:${resumeFile?.id || resumeFile?.name || "empty"}`}
           file={resumeFile} notes={resumeNotes} previewError={resumePreviewError}
           replacing={resumeReplacing} canReplace={canSwitchInterview} onReplace={handleActiveResumeReplacement}
@@ -1951,36 +1866,19 @@ function App() {
           saveState={annotationSaveStates[activeApplication.id] || "saved"} />
 
         <SplitPane id="assistant-panels" preferenceKey="assistSplit" className="assist-pane" direction="vertical"
-          label="调整 AI 追问与实时转录高度" defaultSize={54} minPrimary={150} minSecondary={150}>
-          <section className={`cards pane ${focusedPanel === "analysis" ? "panel-focus-mode" : ""}`}>
-            <PanelTitle icon={<WandSparkles size={18} />} title="AI 追问">
-              <button
-                className="followup-action"
-                disabled={!currentSegmentText.trim() || currentSegmentPending}
-                onClick={processNow}
-                title={
-                  currentSegmentPending
-                    ? "当前片段正在分析"
-                    : currentSegmentText.trim()
-                      ? "分析最新转录"
-                      : "暂无新转录"
-                }
-              >
-                <WandSparkles size={15} />
-                <span className="tool-label">{currentSegmentPending ? "分析中" : "立即追问"}</span>
-              </button>
-              <button className="icon-button" onClick={() => setFocusedPanel((value) => value === "analysis" ? "" : "analysis")}
-                aria-label={focusedPanel === "analysis" ? "退出追问专注模式" : "最大化 AI 追问"} title={focusedPanel === "analysis" ? "退出追问专注模式" : "最大化 AI 追问"}>
-                {focusedPanel === "analysis" ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-              </button>
-            </PanelTitle>
-            <AnalysisCardList cards={cards} onRetry={handleRetryCard} />
-          </section>
+          label="调整 AI 面试助手与实时转录高度" defaultSize={72} minPrimary={190} minSecondary={130}>
+          <InterviewAssistantPanel key={`${activeInterviewId}:${assistantResetKey}`}
+            state={assistant.state} lines={lines} speakerLabels={speakerLabels} jobs={assistant.jobs}
+            autoEnabled={assistant.autoEnabled} onToggleAuto={assistant.toggleAuto}
+            onRequestFollowup={() => assistant.request("followup")} onRetry={assistant.retry}
+            focused={focusedPanel === "analysis"} onToggleFocus={() => setFocusedPanel((value) => value === "analysis" ? "" : "analysis")}
+            legacyCards={cards} onRetryLegacy={handleRetryCard} error={assistant.error}
+            submitting={assistant.submitting} loading={assistant.loading} />
 
           <TranscriptPanel
             focused={focusedPanel === "transcript"}
             onToggleFocus={() => setFocusedPanel((value) => value === "transcript" ? "" : "transcript")}
-            lastProcessedLineCount={lastProcessedLineCount}
+            lastProcessedLineCount={Math.max(lastProcessedLineCount, assistant.state.processedLineCount)}
             lines={lines}
             onSpeakerLabelChange={handleSpeakerLabelChange}
             onToggleSpeakerEditor={() => setSpeakerEditorOpen((open) => !open)}

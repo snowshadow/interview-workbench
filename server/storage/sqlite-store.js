@@ -38,7 +38,9 @@ const LEGACY_KNOWN_ARTIFACT_KINDS = new Set([
   "application-handoff",
   "final-summary",
 ]);
-export const SCHEMA_VERSION = 7;
+const ARTIFACT_CONTEXT_SCHEMA_VERSION = 7;
+const ASSISTANT_JOB_STATUSES = new Set(["queued", "running", "retrying", "done", "error", "cancelled"]);
+export const SCHEMA_VERSION = 8;
 
 export class SqliteStore {
   constructor(config, logger) {
@@ -224,6 +226,32 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS jobs_status_created
         ON analysis_jobs(status, created_at);
+      CREATE TABLE IF NOT EXISTS assistant_states (
+        interview_id TEXT PRIMARY KEY REFERENCES interviews(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+        processed_line_count INTEGER NOT NULL DEFAULT 0 CHECK(processed_line_count >= 0),
+        state_json TEXT NOT NULL,
+        updated_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS assistant_jobs (
+        id TEXT PRIMARY KEY,
+        interview_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL CHECK(mode IN ('summary', 'followup')),
+        idempotency_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(interview_id, mode, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS assistant_jobs_status_created
+        ON assistant_jobs(status, created_at);
+      CREATE INDEX IF NOT EXISTS assistant_jobs_interview_created
+        ON assistant_jobs(interview_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS interview_artifacts (
         id TEXT PRIMARY KEY,
         interview_id TEXT NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
@@ -423,7 +451,7 @@ export class SqliteStore {
         WHERE application_id IS NULL OR application_id = ''
       `);
       this.promoteLegacyApplicationArtifacts({
-        preserveContextFlag: storedSchemaVersion >= SCHEMA_VERSION,
+        preserveContextFlag: storedSchemaVersion >= ARTIFACT_CONTEXT_SCHEMA_VERSION,
       });
     });
     this.db.exec(`
@@ -511,15 +539,34 @@ export class SqliteStore {
     };
   }
 
-  importStore(store, { replace = false } = {}) {
+  importStore(store, { replace = false, allowAssistantStateRollback = false } = {}) {
     if (replace) assertImportableStore(store);
-    const interviews = Array.isArray(store?.interviews) ? store.interviews : [];
+    let interviews = Array.isArray(store?.interviews) ? store.interviews : [];
     const applications = Array.isArray(store?.applications) ? store.applications : [];
     const sourceSchemaVersion = Number(store?.schemaVersion) || 0;
-    const allowLegacyArtifactContextFallback = sourceSchemaVersion < SCHEMA_VERSION;
+    const allowLegacyArtifactContextFallback = sourceSchemaVersion < ARTIFACT_CONTEXT_SCHEMA_VERSION;
+    // Older clients save complete snapshots without knowing about the assistant.
+    // Preserve its state and jobs for surviving rounds before replacing rows.
+    const preservedAssistantJobs = [];
     if (replace) {
+      interviews = interviews.map((interview) => {
+        const existing = this.db.prepare("SELECT 1 FROM assistant_states WHERE interview_id = ?")
+          .get(cleanId(interview?.id));
+        if (!Array.isArray(store?.assistantJobs)) {
+          preservedAssistantJobs.push(...this.listAssistantJobs(cleanId(interview?.id)));
+        }
+        if (!existing) return interview;
+        const current = this.getAssistantState(interview.id);
+        const incoming = isObject(interview?.assistantState)
+          ? normalizeAssistantState(interview.assistantState)
+          : null;
+        const preserveCurrent = !incoming || (!allowAssistantStateRollback && (
+          incoming.revision <= current.revision || incoming.processedLineCount < current.processedLineCount
+        ));
+        return preserveCurrent ? { ...interview, assistantState: current } : interview;
+      });
       this.db.exec(
-        "DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interview_artifacts; DELETE FROM application_artifacts; DELETE FROM harness_sessions; DELETE FROM attachments; DELETE FROM interviews; DELETE FROM applications; DELETE FROM jd_library;",
+        "DELETE FROM assistant_jobs; DELETE FROM assistant_states; DELETE FROM analysis_jobs; DELETE FROM analysis_cards; DELETE FROM transcript_lines; DELETE FROM asked_questions; DELETE FROM interview_artifacts; DELETE FROM application_artifacts; DELETE FROM harness_sessions; DELETE FROM attachments; DELETE FROM interviews; DELETE FROM applications; DELETE FROM jd_library;",
       );
     }
     for (const [index, status] of normalizeStatuses(
@@ -540,11 +587,15 @@ export class SqliteStore {
         mirrorApplicationArtifacts: false,
         allowLegacyArtifactContextFallback,
         preserveArtifactTimestamps: true,
+        allowAssistantStateRollback,
       });
     }
     this.promoteLegacyApplicationArtifacts({
-      preserveContextFlag: sourceSchemaVersion >= SCHEMA_VERSION,
+      preserveContextFlag: sourceSchemaVersion >= ARTIFACT_CONTEXT_SCHEMA_VERSION,
     });
+    for (const job of Array.isArray(store?.assistantJobs) ? store.assistantJobs : preservedAssistantJobs) {
+      this.restoreAssistantJob(job);
+    }
     for (const application of applications) {
       if (!application.resumeFile?.dataUrl) continue;
       try {
@@ -1554,6 +1605,145 @@ export class SqliteStore {
     return this.getProviderSettings();
   }
 
+  getAssistantState(interviewId) {
+    const row = this.db.prepare("SELECT * FROM assistant_states WHERE interview_id = ?").get(interviewId);
+    return row ? {
+      ...normalizeAssistantState(parseJson(row.state_json, {})),
+      revision: row.revision,
+      processedLineCount: row.processed_line_count,
+      updatedAt: row.updated_at || null,
+    } : normalizeAssistantState({});
+  }
+
+  saveAssistantState(interviewId, state, { expectedRevision } = {}) {
+    return this.transaction(() => {
+      if (!this.getInterviewContext(interviewId)) return null;
+      const current = this.getAssistantState(interviewId);
+      const normalized = normalizeAssistantState(state);
+      if (
+        (expectedRevision !== undefined && Number(expectedRevision) !== current.revision) ||
+        normalized.processedLineCount < current.processedLineCount
+      ) {
+        const error = new Error("面试进度已更新，请基于最新内容重试");
+        error.code = "ASSISTANT_STATE_CONFLICT";
+        throw error;
+      }
+      const next = {
+        ...normalized,
+        revision: current.revision + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      this.restoreAssistantState(interviewId, next);
+      return this.getAssistantState(interviewId);
+    });
+  }
+
+  restoreAssistantState(interviewId, state) {
+    const value = normalizeAssistantState(state);
+    this.db.prepare(`
+      INSERT INTO assistant_states
+        (interview_id, revision, processed_line_count, state_json, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(interview_id) DO UPDATE SET
+        revision=excluded.revision, processed_line_count=excluded.processed_line_count,
+        state_json=excluded.state_json, updated_at=excluded.updated_at
+    `).run(interviewId, value.revision, value.processedLineCount, JSON.stringify(value), value.updatedAt);
+  }
+
+  createAssistantJob({ interviewId, mode, payload, idempotencyKey, maxAttempts = 3 }) {
+    if (!["summary", "followup"].includes(mode)) throw new Error("Invalid assistant job mode");
+    return this.transaction(() => {
+      if (!this.getInterviewContext(interviewId)) return null;
+      const key = cleanText(idempotencyKey, 1000) || crypto.randomUUID();
+      const existing = this.db.prepare(`
+        SELECT * FROM assistant_jobs WHERE interview_id = ? AND mode = ? AND idempotency_key = ?
+      `).get(interviewId, mode, key);
+      if (existing) return mapAssistantJob(existing);
+      const now = new Date().toISOString();
+      const id = crypto.randomUUID();
+      this.db.prepare(`
+        INSERT INTO assistant_jobs
+          (id, interview_id, mode, idempotency_key, status, attempts, max_attempts,
+           payload_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
+      `).run(id, interviewId, mode, key, positiveInteger(maxAttempts, 3), JSON.stringify(payload || {}), now, now);
+      return this.getAssistantJob(id);
+    });
+  }
+
+  getAssistantJob(id) {
+    const row = this.db.prepare("SELECT * FROM assistant_jobs WHERE id = ?").get(id);
+    return row ? mapAssistantJob(row) : null;
+  }
+
+  listRunnableAssistantJobs(limit = 10) {
+    return this.db.prepare(`
+      SELECT assistant_jobs.* FROM assistant_jobs
+      JOIN interviews ON interviews.id = assistant_jobs.interview_id
+      JOIN applications ON applications.id = interviews.application_id
+      WHERE assistant_jobs.status IN ('queued', 'retrying')
+        AND interviews.deleted_at IS NULL AND applications.deleted_at IS NULL
+      ORDER BY assistant_jobs.created_at, assistant_jobs.rowid LIMIT ?
+    `).all(positiveInteger(limit, 10)).map(mapAssistantJob);
+  }
+
+  listAssistantJobs(interviewId, { pendingOnly = false } = {}) {
+    return this.db.prepare(`
+      SELECT * FROM assistant_jobs WHERE interview_id = ?
+        ${pendingOnly ? "AND status IN ('queued', 'running', 'retrying')" : ""}
+      ORDER BY created_at DESC, rowid DESC
+    `).all(interviewId).map(mapAssistantJob);
+  }
+
+  updateAssistantJob(id, patch) {
+    const current = this.getAssistantJob(id);
+    if (!current) return null;
+    const next = { ...current, ...pick(patch, ["status", "attempts", "payload", "result", "error"]), updatedAt: new Date().toISOString() };
+    if (!ASSISTANT_JOB_STATUSES.has(next.status)) throw new Error("Invalid assistant job status");
+    this.db.prepare(`
+      UPDATE assistant_jobs SET status=?, attempts=?, payload_json=?, result_json=?, error=?, updated_at=? WHERE id=?
+    `).run(
+      next.status,
+      nonnegativeInteger(next.attempts),
+      JSON.stringify(next.payload || {}),
+      next.result == null ? null : JSON.stringify(next.result),
+      cleanText(next.error, 20000) || null,
+      next.updatedAt,
+      id,
+    );
+    return this.getAssistantJob(id);
+  }
+
+  retryAssistantJob(id) {
+    const current = this.getAssistantJob(id);
+    if (!current || !["error", "cancelled"].includes(current.status)) return null;
+    return this.updateAssistantJob(id, { status: "queued", attempts: 0, error: "", result: null });
+  }
+
+  restoreAssistantJob(job) {
+    if (!isObject(job) || !["summary", "followup"].includes(job.mode) || !this.getInterviewContext(job.interviewId)) return;
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO assistant_jobs
+        (id, interview_id, mode, idempotency_key, status, attempts, max_attempts,
+         payload_json, result_json, error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      cleanId(job.id) || crypto.randomUUID(),
+      job.interviewId,
+      job.mode,
+      cleanText(job.idempotencyKey, 1000) || crypto.randomUUID(),
+      ASSISTANT_JOB_STATUSES.has(job.status) ? job.status : "queued",
+      nonnegativeInteger(job.attempts),
+      positiveInteger(job.maxAttempts, 3),
+      JSON.stringify(job.payload || {}),
+      job.result == null ? null : JSON.stringify(job.result),
+      cleanText(job.error, 20000) || null,
+      normalizeDate(job.createdAt) || now,
+      normalizeDate(job.updatedAt) || now,
+    );
+  }
+
   createAnalysisJob({ interviewId, card, payload, idempotencyKey, maxAttempts = 3 }) {
     const existing = this.db
       .prepare("SELECT * FROM analysis_jobs WHERE idempotency_key = ?")
@@ -1645,6 +1835,10 @@ export class SqliteStore {
   recoverInterruptedJobs() {
     const now = new Date().toISOString();
     this.db.prepare(`
+      UPDATE assistant_jobs SET status='retrying', error='Recovered after restart', updated_at=?
+      WHERE status IN ('running', 'retrying')
+    `).run(now);
+    this.db.prepare(`
       UPDATE analysis_jobs SET status='retrying', error='Recovered after restart', updated_at=?
       WHERE status IN ('running','retrying')
     `).run(now);
@@ -1668,6 +1862,7 @@ export class SqliteStore {
     return {
       ...store,
       exportedAt: new Date().toISOString(),
+      assistantJobs: store.interviews.flatMap((interview) => this.listAssistantJobs(interview.id)),
       applications: store.applications.map((application) => {
         if (!application.resumeFile) return application;
         const attachment = this.getAttachment(application.resumeFile.id);
@@ -1687,7 +1882,11 @@ export class SqliteStore {
   importBackup(store) {
     assertImportableStore(store, "备份文件格式无效");
     this.backup();
-    return this.transaction(() => this.importStore(store, { replace: true }));
+    return this.transaction(() => {
+      const imported = this.importStore(store, { replace: true, allowAssistantStateRollback: true });
+      this.recoverInterruptedJobs();
+      return imported;
+    });
   }
 
   transaction(callback) {
@@ -1790,6 +1989,7 @@ export class SqliteStore {
       ...(includeLines ? { lines } : {}),
       transcriptLineCount,
       cards,
+      assistantState: this.getAssistantState(row.id),
       askedQuestions,
       lastProcessedLineCount: row.last_processed_line_count,
       speakerLabels: parseJson(row.speaker_labels_json, {}),
@@ -1804,6 +2004,7 @@ export class SqliteStore {
       mirrorApplicationArtifacts = true,
       allowLegacyArtifactContextFallback = false,
       preserveArtifactTimestamps = false,
+      allowAssistantStateRollback = false,
     } = {},
   ) {
     const applicationId = cleanId(interview?.applicationId) || cleanId(interview?.id) || crypto.randomUUID();
@@ -1846,6 +2047,16 @@ export class SqliteStore {
       preserveTimestamps: preserveArtifactTimestamps,
     });
     this.replaceHarnessSessions(normalized.id, normalized.harnessSessions);
+    if (isObject(interview.assistantState)) {
+      const current = this.getAssistantState(normalized.id);
+      const incoming = normalizeAssistantState(interview.assistantState);
+      const exists = this.db.prepare("SELECT 1 FROM assistant_states WHERE interview_id = ?").get(normalized.id);
+      if (!exists || allowAssistantStateRollback || (
+        incoming.revision > current.revision && incoming.processedLineCount >= current.processedLineCount
+      )) {
+        this.restoreAssistantState(normalized.id, incoming);
+      }
+    }
   }
 
   upsertApplicationSnapshot(
@@ -2306,6 +2517,66 @@ function mapCard(row) {
     segmentEnd: row.segment_end,
     snapshotLineCount: row.segment_end,
     attempts: row.attempts,
+  };
+}
+
+function nonnegativeInteger(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function positiveInteger(value, fallback) {
+  return nonnegativeInteger(value) || fallback;
+}
+
+function normalizeAssistantState(state) {
+  const value = isObject(state) ? state : {};
+  const evidenceIds = (items) => Array.isArray(items)
+    ? [...new Set(items.map((item) => cleanText(item, 1000)).filter(Boolean))]
+    : [];
+  return {
+    revision: nonnegativeInteger(value.revision),
+    processedLineCount: nonnegativeInteger(value.processedLineCount),
+    updatedAt: normalizeDate(value.updatedAt) || null,
+    topics: (Array.isArray(value.topics) ? value.topics : []).filter(isObject).map((topic) => ({
+      id: cleanText(topic.id, 160) || crypto.randomUUID(),
+      title: cleanText(topic.title, 4000),
+      origin: topic.origin === "emergent" ? "emergent" : "outline",
+      summary: cleanText(topic.summary, 50000),
+      status: ["unasked", "answering", "partial", "covered"].includes(topic.status) ? topic.status : "unasked",
+      qas: (Array.isArray(topic.qas) ? topic.qas : []).filter(isObject).map((qa) => ({
+        id: cleanText(qa.id, 160) || crypto.randomUUID(),
+        question: cleanText(qa.question, 50000),
+        answer: cleanText(qa.answer, 100000),
+        status: ["answering", "partial", "answered"].includes(qa.status) ? qa.status : "partial",
+        evidenceLineIds: evidenceIds(qa.evidenceLineIds),
+        gap: cleanText(qa.gap, 20000),
+      })),
+    })),
+    followups: (Array.isArray(value.followups) ? value.followups : []).filter(isObject).map((item) => ({
+      id: cleanText(item.id, 160) || crypto.randomUUID(),
+      topicId: cleanText(item.topicId, 160),
+      ...(item.qaId ? { qaId: cleanText(item.qaId, 160) } : {}),
+      question: cleanText(item.question, 50000),
+      evidenceLineIds: evidenceIds(item.evidenceLineIds),
+    })),
+  };
+}
+
+function mapAssistantJob(row) {
+  return {
+    id: row.id,
+    interviewId: row.interview_id,
+    mode: row.mode,
+    idempotencyKey: row.idempotency_key,
+    status: row.status,
+    attempts: row.attempts,
+    maxAttempts: row.max_attempts,
+    payload: parseJson(row.payload_json, {}),
+    ...(row.result_json ? { result: parseJson(row.result_json, null) } : {}),
+    error: row.error || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
