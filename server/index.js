@@ -13,6 +13,8 @@ import { createLlmProvider } from "./providers/llm/index.js";
 import { createAsrProvider } from "./providers/asr/index.js";
 import { AnalysisJobService } from "./services/analysis-job-service.js";
 import { createInterviewAnalyzer } from "./services/interview-analysis.js";
+import { AssistantJobService } from "./services/assistant-job-service.js";
+import { createLiveInterviewAssistant } from "./services/live-interview-assistant.js";
 import { extractWordPreviewText, isWordAttachment } from "./services/resume-preview.js";
 import {
   canOpenSystemCalendar,
@@ -38,6 +40,11 @@ const asrProvider = createAsrProvider(config.asr, logger);
 const analysisJobService = new AnalysisJobService({
   store: storeRepository,
   provider: createInterviewAnalyzer(llmProvider),
+  logger,
+});
+const assistantJobService = new AssistantJobService({
+  store: storeRepository,
+  provider: createLiveInterviewAssistant(llmProvider),
   logger,
 });
 const PORT = config.port;
@@ -475,7 +482,8 @@ app.get("/api/export", (_req, res) => {
 
 app.post("/api/import", (req, res) => {
   try {
-    const nextStore = storeRepository.importBackup(req.body?.store || req.body);
+    const nextStore = assistantJobService.replaceStore(() =>
+      storeRepository.importBackup(req.body?.store || req.body));
     appendServerLog("store.imported", {
       applications: nextStore.applications?.length || 0,
       interviews: nextStore.interviews.length,
@@ -510,6 +518,34 @@ app.put("/api/status-options", (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message || "状态颜色保存失败" });
   }
+});
+
+app.get("/api/interviews/:interviewId/assistant", (req, res) => {
+  if (!storeRepository.getInterview(req.params.interviewId)) return res.status(404).json({ error: "面试场次不存在" });
+  res.json(assistantSnapshot(req.params.interviewId));
+});
+
+app.post("/api/interviews/:interviewId/assistant-jobs", (req, res) => {
+  try {
+    if (!llmProvider.isConfigured()) return res.status(400).json({ error: "大模型尚未配置，请先打开配置填写服务信息" });
+    const job = assistantJobService.enqueue({ interviewId: req.params.interviewId, mode: req.body?.mode || "followup" });
+    res.status(job ? 202 : 200).json({ ...assistantSnapshot(req.params.interviewId), job: job ? publicAssistantJob(job) : null });
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: error.message || "创建助手任务失败" });
+  }
+});
+
+app.get("/api/assistant-jobs/:jobId", (req, res) => {
+  const job = assistantJobService.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "助手任务不存在" });
+  res.json(publicAssistantJob(job));
+});
+
+app.post("/api/assistant-jobs/:jobId/retry", (req, res) => {
+  if (!llmProvider.isConfigured()) return res.status(400).json({ error: "大模型尚未配置" });
+  const job = assistantJobService.retry(req.params.jobId);
+  if (!job) return res.status(409).json({ error: "当前任务不可重试" });
+  res.status(202).json(publicAssistantJob(job));
 });
 
 app.post("/api/analyze-jobs", (req, res) => {
@@ -620,7 +656,24 @@ server.on("error", (error) => {
 });
 
 analysisJobService.start();
+assistantJobService.start();
 registerProcessLogging();
+
+function assistantSnapshot(interviewId) {
+  return {
+    state: storeRepository.getAssistantState(interviewId),
+    jobs: storeRepository.listAssistantJobs(interviewId).map(publicAssistantJob),
+  };
+}
+
+function publicAssistantJob(job) {
+  return {
+    id: job.id, interviewId: job.interviewId, mode: job.mode, status: job.status,
+    attempts: job.attempts, maxAttempts: job.maxAttempts, error: job.error || "",
+    createdAt: job.createdAt, updatedAt: job.updatedAt,
+    targetLineCount: job.payload?.targetLineCount,
+  };
+}
 
 function normalizeAnalyzePayload(body) {
   return {
@@ -688,13 +741,14 @@ function registerProcessLogging() {
     process.once(signal, () => {
       appendServerLog("process.signal", { pid: process.pid, signal });
       analysisJobService.stop();
+      assistantJobService.stop();
       for (const client of wss.clients) client.close(1001, "Server shutting down");
       const exitCode = signal === "SIGINT" ? 130 : 143;
       const forceExit = setTimeout(() => process.exit(exitCode), 3000);
       forceExit.unref();
       server.close(async () => {
         const deadline = Date.now() + 2500;
-        while (analysisJobService.running.size && Date.now() < deadline) {
+        while ((analysisJobService.running.size || assistantJobService.running.size) && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
         try {
