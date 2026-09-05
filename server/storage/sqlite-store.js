@@ -9,7 +9,6 @@ import {
   MAX_INTERVIEW_DURATION_MINUTES,
   MIN_INTERVIEW_DURATION_MINUTES,
   ROUND_STATUS_OPTIONS,
-  isRetiredApplicationStatus,
   isValidInterviewDurationMinutes,
   normalizeStatusLabel,
   resolveInterviewDurationMinutes,
@@ -594,7 +593,7 @@ export class SqliteStore {
 
   createApplication(payload = {}) {
     const now = new Date().toISOString();
-    assertWritableApplicationStatus(requestedApplicationStatus(payload));
+    assertValidApplicationStatus(requestedApplicationStatus(payload));
     const applicationId = cleanId(payload.id || payload.applicationId) || crypto.randomUUID();
     if (this.db.prepare("SELECT 1 FROM applications WHERE id = ?").get(applicationId)) {
       const error = new Error("应聘流程 ID 已存在");
@@ -843,7 +842,7 @@ export class SqliteStore {
     const statusWasProvided = hasApplicationStatusField(patch);
     if (statusWasProvided) {
       aliases.applicationStatus = requestedApplicationStatus(patch);
-      assertWritableApplicationStatus(aliases.applicationStatus, current.applicationStatus);
+      assertValidApplicationStatus(aliases.applicationStatus);
     }
     const merged = normalizeApplication({
       ...current,
@@ -2122,25 +2121,13 @@ function requestedApplicationStatus(value) {
   return value.applicationStatus || value.interviewStatus || value.status || "";
 }
 
-function assertWritableApplicationStatus(value, currentStatus) {
+function assertValidApplicationStatus(value) {
   if (value === undefined) return;
   if (typeof value !== "string" || !normalizeStatusLabel(value)) {
     const error = new Error("应聘流程状态必须是非空文本");
     error.code = "INVALID_APPLICATION_STATUS";
     throw error;
   }
-  if (!isRetiredApplicationStatus(value)) return;
-  if (
-    currentStatus !== undefined &&
-    normalizeStatusLabel(value) === normalizeStatusLabel(currentStatus)
-  ) {
-    return;
-  }
-  const error = new Error(
-    "旧版或轮次状态不能写入应聘流程；请改填轮次状态或本轮结果",
-  );
-  error.code = "RETIRED_APPLICATION_STATUS";
-  throw error;
 }
 
 function normalizeInterview(interview) {

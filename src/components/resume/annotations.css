@@ -1,0 +1,110 @@
+.annotation-pane { position: relative; flex: 1; min-width: 0; min-height: 0; }
+.annotation-pane.resume-focus-mode { position: fixed; }
+.annotation-pane .resume-preview-surface { border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+
+/* PDF.js text geometry over the canvas, without changing PDF layout. */
+.pdf-text-layer {
+  position: absolute; inset: 0; overflow: clip; line-height: 1; text-align: initial;
+  letter-spacing: normal; word-spacing: normal; text-size-adjust: none; forced-color-adjust: none;
+  transform-origin: 0 0; z-index: 1; color-scheme: only light;
+  --scale-round-x: 1px; --scale-round-y: 1px; --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pdf-text-layer :is(span, br) {
+  color: transparent; position: absolute; white-space: pre; cursor: text;
+  transform-origin: 0 0; user-select: text; -webkit-user-select: text;
+}
+.pdf-text-layer > :not(.markedContent), .pdf-text-layer .markedContent span:not(.markedContent) {
+  z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1; --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.pdf-text-layer .markedContent { display: contents; }
+.pdf-text-layer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.pdf-text-layer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.pdf-text-layer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+.pdf-text-layer ::selection { background: #4d79d344; color: transparent; }
+.annotation-marking { cursor: crosshair; }
+.annotation-marking .pdf-text-layer { cursor: crosshair; }
+.annotation-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.annotation-highlight { position: absolute; border-radius: 2px; background: #4779de20; box-shadow: inset 0 -1px #4779de38; }
+.annotation-highlight.active { background: #4779de30; box-shadow: inset 0 -1px #4779de88; }
+.annotation-marker {
+  position: absolute; min-width: 20px; min-height: 20px; height: 20px; padding: 0 3px; border: 1px solid #426dce38;
+  border-radius: 5px; background: #f7f9fff2; color: #3862bd; box-shadow: 0 1px 3px #1c305c0c;
+  transform: translate(-25%, -80%); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums;
+  pointer-events: auto; cursor: pointer; transition: background 150ms ease, box-shadow 150ms ease;
+}
+.annotation-marker::after { content: ""; position: absolute; inset: -4px; }
+.annotation-marker:hover:not(:disabled), .annotation-marker.selected {
+  background: #456dca; color: white; border-color: transparent; box-shadow: 0 0 0 3px #456dca18;
+}
+.annotation-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.annotation-floating {
+  position: absolute; z-index: 5; overflow: auto; overscroll-behavior: contain;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  box-shadow: 0 3px 6px #26304908, 0 12px 36px #2630491a; animation: annotation-appear 130ms ease-out;
+}
+.annotation-card-content { padding: 13px 14px 11px; position: relative; }
+.annotation-card-head { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.annotation-number { font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--accent); }
+.annotation-card-head > .annotation-number { padding: 2px 4px; border-radius: 4px; background: var(--accent-soft); }
+.annotation-card-actions { display: flex; gap: 1px; margin-left: auto; }
+.annotation-card-actions .icon-button, .annotations-overview-head .icon-button { min-width: 24px; min-height: 24px; width: 24px; height: 24px; border: 0; background: transparent; box-shadow: none; color: var(--text-tertiary); }
+.annotation-quote { margin: 10px 0 6px; border-left: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); padding-left: 8px; font-size: 11px; line-height: 1.6; color: var(--text-tertiary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.annotation-text, .annotation-editor {
+  display: block; width: 100%; min-width: 0; min-height: 60px; margin: 9px 0; padding: 5px 0;
+  border: 0; border-radius: 0; box-shadow: none; background: transparent; color: var(--text);
+  font: inherit; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left;
+}
+.annotation-text { cursor: text; }
+.annotation-text:hover:not(:disabled) { background: transparent; color: var(--text); box-shadow: none; }
+.annotation-text:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+.annotation-editor { resize: none; max-height: 220px; caret-color: var(--accent); }
+.annotation-editor:focus { outline: none; box-shadow: none; }
+.annotation-floating:has(.annotation-editor:focus) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.annotation-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; font-size: 10px; color: var(--text-tertiary); }
+.annotation-save-state { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+.annotation-save-state button { padding: 0; min-height: 18px; border: 0; background: transparent; color: var(--danger); font-size: 10px; }
+.annotation-actions-menu { position: absolute; right: 14px; top: 42px; z-index: 1; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-popover); }
+.annotation-actions-menu button { min-height: 30px; font-size: 12px; border: 0; color: var(--danger); background: transparent; box-shadow: none; }
+.annotation-selection-action { position: absolute; z-index: 4; gap: 6px; min-height: 36px; padding: 6px 11px; font-size: 12px; border-radius: 8px; box-shadow: var(--shadow-popover); color: var(--accent); background: var(--surface); }
+.annotation-mode-hint, .annotation-undo {
+  display: flex; align-items: center; gap: 8px; position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  max-width: calc(100% - 24px); z-index: 6; border: 1px solid var(--border); border-radius: 9px; padding: 6px 10px;
+  background: var(--surface); box-shadow: var(--shadow-popover); color: var(--text-secondary); font-size: 11px; white-space: nowrap;
+}
+.annotation-mode-hint button, .annotation-undo button { min-height: 26px; padding: 0 4px; border: 0; background: transparent; box-shadow: none; font-size: 11px; color: var(--accent); }
+.annotation-mode-hint kbd { padding: 1px 3px; border: 1px solid var(--border); border-radius: 3px; font: inherit; font-size: 9px; color: var(--text-tertiary); }
+
+.annotations-overview {
+  position: absolute; z-index: 7; right: 12px; top: 51px; width: min(390px, calc(100% - 24px)); max-height: calc(100% - 68px);
+  display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  box-shadow: 0 3px 6px #26304908, 0 12px 36px #2630491a; overflow: hidden; animation: annotation-appear 130ms ease-out;
+}
+.annotations-overview-head { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 12px 15px 6px; font-size: 13px; }
+.annotations-overview-head strong { font-weight: 600; }
+.annotations-overview-head > div { display: flex; gap: 5px; }
+.annotations-overview-head small { margin-left: 8px; font-size: 10px; font-weight: 400; color: var(--text-tertiary); }
+.annotations-overview-head strong span { margin-left: 5px; padding: 1px 5px; border-radius: 5px; background: var(--surface-subtle); font-size: 11px; color: var(--text-tertiary); }
+.annotations-search { display: flex; flex-shrink: 0; align-items: center; gap: 7px; padding: 0 10px; margin: 6px 13px 9px; min-width: 0; color: var(--text-tertiary); border: 1px solid var(--hairline); border-radius: 7px; background: var(--surface-subtle); }
+.annotations-search input { width: 100%; min-width: 0; min-height: 30px; padding: 5px 0; font-size: 12px; border: 0; background: transparent; box-shadow: none; }
+.annotations-search input:focus { outline: none; box-shadow: none; }
+.annotations-search:focus-within { border-color: var(--accent); }
+.annotations-overview-list { padding: 0 8px 4px; overflow: auto; overscroll-behavior: contain; min-height: 0; }
+.annotation-overview-row { display: flex; width: 100%; align-items: flex-start; gap: 10px; min-width: 0; padding: 6px 7px; border: 0; border-bottom: 1px solid var(--hairline); border-radius: 6px; background: transparent; box-shadow: none; text-align: left; }
+.annotation-overview-row:last-child { border-bottom: 0; }
+.annotation-overview-row:hover:not(:disabled) { background: var(--accent-soft); }
+.annotation-overview-row > .annotation-number { line-height: 20px; }
+.annotation-overview-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.annotation-overview-body > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.annotation-overview-body small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; line-height: 12px; color: var(--text-tertiary); }
+.annotation-page { padding-top: 3px; flex-shrink: 0; font-size: 10px; color: var(--text-tertiary); }
+.annotations-overview-footer { flex-shrink: 0; padding: 9px; text-align: center; border-top: 1px solid var(--hairline); color: var(--text-tertiary); font-size: 11px; }
+.annotations-empty { padding: 28px 14px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+.annotations-empty p { color: var(--text-tertiary); font-size: 12px; margin: 8px 0 0; }
+@container resume (width < 400px) { .annotations-overview { top: 81px; max-height: calc(100% - 96px); } .annotation-mode-hint { gap: 4px; padding-inline: 7px; font-size: 10px; } }
+@keyframes annotation-appear { from { opacity: 0; translate: 0 3px; } to { opacity: 1; translate: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .annotation-floating, .annotations-overview { animation: none; } }

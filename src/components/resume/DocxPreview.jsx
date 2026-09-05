@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { clampNumber } from "../../lib/format.js";
 import { ResumeMarkerLayer } from "./ResumeMarkerLayer.jsx";
+import { handleDocumentPointerUp } from "../../lib/resume-annotations.js";
 
 export function DocxPreview({ file, markerProps, zoom }) {
   const containerRef = useRef(null);
@@ -23,12 +24,13 @@ export function DocxPreview({ file, markerProps, zoom }) {
     };
   }, []);
 
-  const fitScale = availableWidth ? Math.min(1, Math.max(0.35, (availableWidth - 34) / 794)) : 1;
-  const scale = clampNumber(fitScale * zoom, 0.25, 2);
+  const fitScale = availableWidth ? Math.min(1, Math.max(0.1, (availableWidth - 36) / 794)) : 1;
+  const scale = clampNumber(fitScale * zoom, 0.1, 2);
 
   return (
     <div className="docx-preview-viewport" ref={containerRef}>
-      <div className="docx-preview-canvas" style={{ zoom: scale }}>
+      <div className={`docx-preview-canvas ${markerProps.markMode ? "annotation-marking" : ""}`} style={{ zoom: scale }}
+        onPointerUp={(event) => handleDocumentPointerUp(event, markerProps, "document")}>
         <pre>{file.previewText}</pre>
         <ResumeMarkerLayer {...markerProps} coordinateMode="document" />
         <ResumeMarkerLayer

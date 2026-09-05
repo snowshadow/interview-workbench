@@ -39,6 +39,24 @@ test("normalization keeps application status and round duration independent", ()
   );
 });
 
+test("status options include every stored and in-use label without excluding historical names", () => {
+  const saved = ["一面通过", "已安排", " offer ", "offer", "待发 Offer", "二面未通过"];
+  const applications = [{ applicationStatus: "薪资沟通中" }, { applicationStatus: "面试中" }];
+  assert.deepEqual(mergeStatusOptions(saved, applications), [
+    "招聘中", "通过", "未通过", "放弃/归档", "一面通过", "已安排", "offer", "待发 Offer", "二面未通过", "薪资沟通中", "面试中",
+  ]);
+  assert.deepEqual(saved, ["一面通过", "已安排", " offer ", "offer", "待发 Offer", "二面未通过"]);
+});
+
+test("status options recover application labels missing from the option registry even without rounds", () => {
+  const store = normalizeStore({
+    statusOptions: ["offer"],
+    applications: [{ id: "no-rounds", name: "未建轮次流程", applicationStatus: "二面通过" }],
+    interviews: [],
+  });
+  assert.deepEqual(store.statusOptions, ["招聘中", "通过", "未通过", "放弃/归档", "offer", "二面通过"]);
+});
+
 test("role short names survive client normalization and application patches", () => {
   const store = normalizeStore({
     activeInterviewId: "round-1",

@@ -10,7 +10,7 @@ import {
   getInterviewRole,
   getInterviewRoleLabel,
   interviewStatusTone,
-  isRetiredApplicationStatus,
+  normalizeStatusLabel,
   isValidInterviewDurationMinutes,
   resolveInterviewDurationMinutes,
   roundStatusTone,
@@ -40,7 +40,7 @@ test("application and duration defaults have one domain-level source", () => {
   assert.equal(interviewStatusTone("已安排", { 已安排: "purple" }), "purple");
 });
 
-test("retired application statuses remain readable but cannot be written again", () => {
+test("status labels preserve existing workflow names instead of classifying them by wording", () => {
   for (const status of [
     "未面",
     "面试中",
@@ -54,11 +54,11 @@ test("retired application statuses remain readable but cannot be written again",
     "二面未通过",
     "终面待定",
   ]) {
-    assert.equal(isRetiredApplicationStatus(status), true, status);
+    assert.equal(normalizeStatusLabel(` ${status} `), status);
   }
-  for (const status of ["招聘中", "通过", "未通过", "放弃/归档", "offer 审批中", ""]) {
-    assert.equal(isRetiredApplicationStatus(status), false, status);
-  }
+  assert.equal(normalizeStatusLabel(" offer   审批中 "), "offer 审批中");
+  assert.equal(normalizeStatusLabel("   "), "");
+  assert.equal(normalizeStatusLabel(["已安排"]), "");
 });
 
 test("calendar role labels come from interview data without inferring job semantics", () => {

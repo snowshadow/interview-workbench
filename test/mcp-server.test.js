@@ -155,13 +155,21 @@ test("MCP server exposes application and interview-round workflows", async () =>
       ],
     );
 
-    for (const args of [
-      { name: "Legacy Candidate", applicationStatus: "一面通过" },
-      { name: "Legacy Candidate", interviewStatus: "未面" },
-    ]) {
-      await expectToolInputError(client, "create_interview", args);
+    for (const applicationStatus of ["   ", null, 42]) {
+      await expectToolInputError(client, "create_interview", {
+        name: "Invalid Status Candidate", applicationStatus,
+      });
     }
     assert.equal(state.application, null);
+
+    for (const args of [
+      { name: "Restored Status Candidate", applicationStatus: "一面通过" },
+      { name: "Restored Status Candidate", applicationStatus: "二面通过" },
+      { name: "Restored Status Candidate", interviewStatus: "未面" },
+    ]) {
+      const restored = await call(client, "create_interview", args);
+      assert.equal(restored.application.applicationStatus, args.applicationStatus || args.interviewStatus);
+    }
 
     const created = await call(client, "create_interview", {
       name: "Synthetic Candidate",
@@ -254,17 +262,30 @@ test("MCP server exposes application and interview-round workflows", async () =>
     });
     assert.equal(updated.application.applicationStatus, "通过");
 
-    await expectToolInputError(client, "update_application_status", {
-      applicationId: "application-1",
-      applicationStatus: "已安排",
-    });
-    assert.equal(state.application.applicationStatus, "通过");
+    for (const applicationStatus of ["未面", "已安排", "面试中", "已面待定", "一面通过", "二面通过", "二面未通过", "offer"]) {
+      const restored = await call(client, "update_application_status", {
+        applicationId: "application-1", applicationStatus,
+      });
+      assert.equal(restored.application.applicationStatus, applicationStatus);
+      assert.equal(state.interview.roundStatus, "已结束");
+      assert.equal(state.interview.outcome, "通过");
+    }
 
-    await expectToolInputError(client, "update_interview_status", {
+    const restoredAlias = await call(client, "update_interview_status", {
       interviewId: "round-2",
       interviewStatus: "二面未通过",
     });
-    assert.equal(state.application.applicationStatus, "通过");
+    assert.equal(restoredAlias.application.applicationStatus, "二面未通过");
+    assert.equal(restoredAlias.interview.roundStatus, "已结束");
+    assert.equal(restoredAlias.interview.outcome, "通过");
+
+    await expectToolInputError(client, "update_application_status", {
+      applicationId: "application-1", applicationStatus: "   ",
+    });
+    await expectToolInputError(client, "update_interview_status", {
+      interviewId: "round-2", interviewStatus: null,
+    });
+    assert.equal(state.application.applicationStatus, "二面未通过");
 
     const legacyUpdated = await call(client, "update_interview_status", {
       interviewId: "round-2",
@@ -287,7 +308,7 @@ async function expectToolInputError(client, name, args) {
   assert.equal(result.isError, true);
   assert.match(
     result.content.map((item) => item.text || "").join("\n"),
-    /Legacy and round statuses cannot be written as an application status/,
+    /Input validation error/,
   );
 }
 

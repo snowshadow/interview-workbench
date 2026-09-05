@@ -26,7 +26,7 @@
 
 `list_interviews` 分别使用 `applicationStatus` 和 `roundStatus` 过滤招聘状态与轮次生命周期；旧参数 `status` 只作为 `applicationStatus` 的兼容别名。
 
-旧版把“未面”“已安排”“一面通过”等轮次信息写进 Application 状态的数据仍可读取和筛选，但不能继续新建或覆盖写入。自定义流程状态仍可使用；排期写 `roundStatus`，本轮结论写 `outcome`。
+Application 状态是可自定义的流程标签，选项自动合并已保存的状态和流程库中实际使用的状态。“未面”“已安排”“一面通过”等已有标签均可选择、筛选和写入，不按名称排除。更新流程标签不会改变 `roundStatus` 或 `outcome`；轮次生命周期和本轮结论仍分别保存在这两个字段中。
 
 `save_application_artifact` 和 `save_interview_artifact` 通过 `includeInCrossRoundContext` 明确声明产物是否自动进入后续轮次上下文。新的自定义 `kind` 必须显式传入该字段，已有产物更新时省略则保留原值。单轮详细报告 `interview-summary` 默认排除，精简交接 `round-handoff` 默认纳入，避免下一轮重复注入两份同源内容。新调用应使用 `update_application_status` 更新招聘状态，用 `update_interview_round` 更新轮次；`update_interview_status` 只为旧客户端保留。
 

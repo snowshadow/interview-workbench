@@ -7,16 +7,12 @@ import {
   DEFAULT_INTERVIEW_DURATION_MINUTES,
   MAX_INTERVIEW_DURATION_MINUTES,
   MIN_INTERVIEW_DURATION_MINUTES,
-  isRetiredApplicationStatus,
 } from "../src/interview-domain.js";
 import { readAllowedResumeFile } from "./resume-path.js";
 
 const baseUrl = String(process.env.WORKBENCH_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const accessToken = String(process.env.WORKBENCH_ACCESS_TOKEN || "").trim();
-const writableApplicationStatusSchema = z.string().min(1).max(24).refine(
-  (status) => !isRetiredApplicationStatus(status),
-  { message: "Legacy and round statuses cannot be written as an application status" },
-);
+const applicationStatusSchema = z.string().trim().min(1).max(24);
 
 const server = new McpServer({
   name: "interview-workbench",
@@ -89,8 +85,8 @@ server.registerTool("create_interview", {
   description: "Create a candidate application and its first interview round through the backwards-compatible interview endpoint, optionally attach a local PDF/DOC/DOCX resume, and link the current AI session to that round.",
   inputSchema: {
     name: z.string().min(1).max(160).describe("Candidate or interview name"),
-    applicationStatus: writableApplicationStatusSchema.optional().describe("Application hiring status; omitted for the workbench default"),
-    interviewStatus: writableApplicationStatusSchema.optional().describe("Deprecated alias for applicationStatus"),
+    applicationStatus: applicationStatusSchema.optional().describe("Custom application workflow label; omitted for the workbench default"),
+    interviewStatus: applicationStatusSchema.optional().describe("Deprecated alias for applicationStatus"),
     scheduledAt: z.string().optional().describe("ISO 8601 date-time"),
     durationMinutes: z.number().int()
       .min(MIN_INTERVIEW_DURATION_MINUTES)
@@ -242,7 +238,7 @@ server.registerTool("update_application_status", {
   description: "Update the hiring status of a candidate application only after the user has explicitly chosen or approved it.",
   inputSchema: {
     applicationId: z.string().min(1).max(160),
-    applicationStatus: writableApplicationStatusSchema,
+    applicationStatus: applicationStatusSchema,
   },
   annotations: { destructiveHint: false, openWorldHint: false },
 }, async ({ applicationId, applicationStatus }) => toolResult(
@@ -283,7 +279,7 @@ server.registerTool("update_interview_status", {
   description: "Deprecated compatibility tool: update the parent application's hiring status through an interview-round ID. Use update_interview_round for round lifecycle and outcome.",
   inputSchema: {
     interviewId: z.string().min(1).max(160),
-    interviewStatus: writableApplicationStatusSchema,
+    interviewStatus: applicationStatusSchema,
   },
   annotations: { destructiveHint: false, openWorldHint: false },
 }, async ({ interviewId, interviewStatus }) => toolResult(

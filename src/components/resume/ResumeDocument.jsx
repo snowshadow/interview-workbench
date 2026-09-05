@@ -5,40 +5,10 @@ import { DocxPreview } from "./DocxPreview.jsx";
 
 export function ResumeDocument({
   file,
-  markMode,
-  noteDraft,
-  noteEditor,
-  notes,
-  onCancelDraft,
-  onCloseEditor,
-  onDeleteNote,
-  onDraftChange,
-  onEditorChange,
-  onFocusNote,
-  onMark,
-  onSaveDraft,
-  onSaveEditor,
   previewError,
-  selectedNoteId,
   zoom,
+  ...markerProps
 }) {
-  const markerProps = {
-    markMode,
-    noteDraft,
-    noteEditor,
-    notes,
-    onCancelDraft,
-    onCloseEditor,
-    onDeleteNote,
-    onDraftChange,
-    onEditorChange,
-    onFocusNote,
-    onMark,
-    onSaveDraft,
-    onSaveEditor,
-    selectedNoteId,
-  };
-
   if (isPdfFile(file)) {
     return <PdfPreview file={file} markerProps={markerProps} zoom={zoom} />;
   }

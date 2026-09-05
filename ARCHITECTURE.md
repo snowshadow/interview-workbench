@@ -44,7 +44,7 @@ AI 编程助手 (Codex / Claude Code / WorkBuddy)
 
 SQLite 启用 WAL、外键和 busy timeout；事务通过 SAVEPOINT 支持可重入嵌套。进程 umask 为 `077`，数据库、附件、备份和日志使用仅当前用户可读写的权限。
 
-Application 的 `applicationStatus` 表示招聘判断；InterviewRound 的 `roundStatus` 只表示机械生命周期，取值为“待安排、已安排、进行中、已结束、已取消”。新建轮次未显式传状态时，服务按 `scheduledAt` 推导“待安排”或“已安排”；开始、停止和取消等工作台动作继续推进轮次状态。兼容字段 `interviewStatus` 映射到所属 Application 的 `applicationStatus`，不能用来修改 `roundStatus`。
+Application 的 `applicationStatus` 是可自定义的招聘流程标签，选项合并已保存的标签与实际流程数据，不按状态名称排除。InterviewRound 的 `roundStatus` 只表示机械生命周期，取值为“待安排、已安排、进行中、已结束、已取消”。新建轮次未显式传状态时，服务按 `scheduledAt` 推导“待安排”或“已安排”；开始、停止和取消等工作台动作继续推进轮次状态。兼容字段 `interviewStatus` 映射到所属 Application 的 `applicationStatus`，不能用来修改 `roundStatus`。
 
 `GET /api/store` 只内联活跃轮次的转录，其余轮次暴露 `transcriptLineCount`，切换轮次时按需加载；导出和备份始终包含全部转录。分析游标 `last_processed_line_count` 只允许前进，客户端补丁不能回退它。附件按魔数校验内容（PDF/DOCX/DOC/RTF），扩展名和 MIME 以内容为准。
 

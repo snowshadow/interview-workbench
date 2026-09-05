@@ -115,6 +115,11 @@ export function applicationMetadataPatch(application) {
   };
 }
 
+export function applicationMetadataChanges(previous, next) {
+  return Object.fromEntries(Object.entries(applicationMetadataPatch(next))
+    .filter(([key, value]) => previous[key] !== value));
+}
+
 export function normalizeStore(store) {
   const rawInterviews = Array.isArray(store?.interviews) ? store.interviews : [];
   const applicationMap = new Map(
@@ -157,7 +162,7 @@ export function normalizeStore(store) {
     jdLibrary: Array.isArray(store?.jdLibrary)
       ? store.jdLibrary.map(normalizeSavedJd)
       : [],
-    statusOptions: mergeStatusOptions(store?.statusOptions, nextInterviews),
+    statusOptions: mergeStatusOptions(store?.statusOptions, applications, nextInterviews),
     statusColors: normalizeStatusColors(store?.statusColors),
   };
 }

@@ -6,12 +6,6 @@ export const APPLICATION_STATUS_PRESETS = [
   { value: "放弃/归档", color: "red" },
 ];
 export const ROUND_STATUS_OPTIONS = ["待安排", "已安排", "进行中", "已结束", "已取消"];
-const RETIRED_APPLICATION_STATUSES = new Set([
-  "未面",
-  "面试中",
-  "已面待定",
-  ...ROUND_STATUS_OPTIONS,
-]);
 export const DEFAULT_INTERVIEW_DURATION_MINUTES = 60;
 export const MIN_INTERVIEW_DURATION_MINUTES = 1;
 export const MAX_INTERVIEW_DURATION_MINUTES = 24 * 60;
@@ -38,11 +32,6 @@ export function resolveInterviewDurationMinutes(
 export function normalizeStatusLabel(value) {
   if (typeof value !== "string") return "";
   return value.trim().replace(/\s+/g, " ").slice(0, 24);
-}
-
-export function isRetiredApplicationStatus(value) {
-  const status = normalizeStatusLabel(value);
-  return RETIRED_APPLICATION_STATUSES.has(status) || /面(?:通过|未通过|待定)$/u.test(status);
 }
 
 export const STATUS_COLOR_OPTIONS = [
