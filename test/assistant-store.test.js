@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { SCHEMA_VERSION, SqliteStore } from "../server/storage/sqlite-store.js";
+import { mergeAssistantPatch } from "../server/services/live-interview-assistant.js";
+import { buildAssistantView } from "../src/lib/assistant-view.js";
 import { cleanupTestConfig, createTestConfig, sampleInterview, silentLogger } from "./helpers.js";
 
 const EMPTY_STATE = { revision: 0, processedLineCount: 0, updatedAt: null, topics: [], followups: [] };
@@ -74,6 +76,172 @@ test("assistant saves reject stale revisions and older transcript cursors atomic
   } finally {
     second.close();
     first.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("topic evidence survives persistence and backup without inventing a question or changing legacy topics", () => {
+  const sourceConfig = createTestConfig("assistant-topic-evidence-");
+  const targetConfig = createTestConfig("assistant-topic-evidence-restore-");
+  let source = new SqliteStore(sourceConfig, silentLogger);
+  const target = new SqliteStore(targetConfig, silentLogger);
+  try {
+    const interview = source.createInterview(sampleInterview());
+    const saved = source.saveAssistantState(interview.id, state({ topics: [
+      ...state().topics,
+      {
+        id: "introduction", title: "项目经历", origin: "emergent", status: "answering",
+        summary: "候选人主动介绍了最近的项目，尚未进入问答。",
+        evidenceLineIds: ["line-1", " line-2 ", "line-1", ""], qas: [],
+      },
+    ] }));
+    assert.equal(Object.hasOwn(saved.topics[0], "evidenceLineIds"), false);
+    assert.deepEqual(saved.topics[1].evidenceLineIds, ["line-1", "line-2"]);
+    assert.deepEqual(saved.topics[1].qas, []);
+    source.close();
+    source = new SqliteStore(sourceConfig, silentLogger);
+    assert.deepEqual(source.getAssistantState(interview.id), saved);
+    target.importBackup(source.exportStore());
+    assert.deepEqual(target.getAssistantState(interview.id), saved);
+  } finally {
+    source.close();
+    target.close();
+    cleanupTestConfig(sourceConfig);
+    cleanupTestConfig(targetConfig);
+  }
+});
+
+test("focus and compact presentation fields survive reopening and backup without truncating full content", () => {
+  const sourceConfig = createTestConfig("assistant-focus-");
+  const targetConfig = createTestConfig("assistant-focus-restore-");
+  let source = new SqliteStore(sourceConfig, silentLogger);
+  const target = new SqliteStore(targetConfig, silentLogger);
+  try {
+    const interview = source.createInterview(sampleInterview());
+    const input = state();
+    input.focus = { topicId: " runtime ", qaId: " ownership ", evidenceLineIds: ["line-1", " line-2 ", "line-1", ""] };
+    input.topics[0].shortTitle = "运行时中的个人职责与故障恢复机制";
+    input.topics[0].summary = "历史摘要的完整内容需要保留。".repeat(12);
+    input.topics[0].qas[0].shortQuestion = "具体如何区分团队完成的项目成果与你本人承担的实现和线上排查职责";
+    input.topics[0].qas[0].answer = "历史回答包含具体做法和验证过程。".repeat(12);
+    input.followups[0].purpose = "核实个人职责与线上结果";
+    input.followups[0].source = "automatic";
+    input.followups.push({ id: "manual-next", topicId: "runtime", question: "请补充验证结果。", purpose: "补充结果", source: "manual", evidenceLineIds: ["line-2"] });
+    const saved = source.saveAssistantState(interview.id, input);
+    assert.deepEqual(saved.focus, { topicId: "runtime", qaId: "ownership", evidenceLineIds: ["line-1", "line-2"] });
+    assert.equal(saved.topics[0].shortTitle, input.topics[0].shortTitle.slice(0, 12));
+    assert.equal(saved.topics[0].qas[0].shortQuestion, input.topics[0].qas[0].shortQuestion.slice(0, 24));
+    assert.equal(saved.followups[0].purpose, input.followups[0].purpose.slice(0, 8));
+    assert.deepEqual(saved.followups.map((item) => item.source), ["automatic", "manual"]);
+    assert.equal(saved.topics[0].title, input.topics[0].title);
+    assert.equal(saved.topics[0].summary, input.topics[0].summary);
+    assert.equal(saved.topics[0].qas[0].question, input.topics[0].qas[0].question);
+    assert.equal(saved.topics[0].qas[0].answer, input.topics[0].qas[0].answer);
+    assert.equal(Object.hasOwn(saved.topics[0].qas[1], "shortQuestion"), false);
+    source.close();
+    source = new SqliteStore(sourceConfig, silentLogger);
+    assert.deepEqual(source.getAssistantState(interview.id), saved);
+    target.importBackup(source.exportStore());
+    assert.deepEqual(target.getAssistantState(interview.id), saved);
+  } finally {
+    source.close();
+    target.close();
+    cleanupTestConfig(sourceConfig);
+    cleanupTestConfig(targetConfig);
+  }
+});
+
+test("question ownership survives saving, reopening and backup so candidate questions stay suppressed", () => {
+  const sourceConfig = createTestConfig("assistant-question-role-");
+  const targetConfig = createTestConfig("assistant-question-role-restore-");
+  let source = new SqliteStore(sourceConfig, silentLogger);
+  const target = new SqliteStore(targetConfig, silentLogger);
+  try {
+    const lines = [
+      { id: "line-1", text: "团队平时如何协作？", speaker: "2" },
+      { id: "line-2", text: "我们每周一起制定计划。", speaker: "1" },
+      { id: "line-3", text: "你如何处理协作中的分歧？", speaker: "1" },
+      { id: "line-4", text: "我会先核对双方的目标。", speaker: "2" },
+    ];
+    const interview = source.createInterview(sampleInterview({ lines }));
+    const input = state({
+      processedLineCount: lines.length,
+      topics: [{
+        id: "team", title: "团队协作", askedBy: "candidate", status: "partial",
+        qas: [
+          { id: "candidate", question: lines[0].text, answer: lines[1].text, askedBy: "candidate", status: "answered", evidenceLineIds: ["line-1", "line-2"], gap: "" },
+          { id: "interviewer", question: lines[2].text, answer: lines[3].text, askedBy: "interviewer", status: "answered", evidenceLineIds: ["line-3", "line-4"], gap: "" },
+        ],
+      }],
+      focus: { topicId: "team", qaId: "candidate", evidenceLineIds: ["line-1", "line-2"] },
+      followups: [{ id: "stale", topicId: "team", qaId: "candidate", question: "计划如何分工？", source: "manual", evidenceLineIds: ["line-2"] }],
+    });
+    const saved = source.saveAssistantState(interview.id, input);
+    source.close();
+    source = new SqliteStore(sourceConfig, silentLogger);
+    target.importBackup(source.exportStore());
+
+    for (const current of [saved, source.getAssistantState(interview.id), target.getAssistantState(interview.id)]) {
+      assert.equal(current.topics[0].askedBy, "candidate");
+      assert.deepEqual(current.topics[0].qas.map((qa) => qa.askedBy), ["candidate", "interviewer"]);
+      assert.equal(buildAssistantView(current, lines).candidateQuestion, true);
+      assert.equal(buildAssistantView(current, lines).suggestion, null);
+      assert.deepEqual(mergeAssistantPatch(current, { topics: [], followups: current.followups }, { mode: "followup", lines }).followups, []);
+      assert.equal(buildAssistantView({ ...current, focus: { topicId: "team" } }, lines).candidateQuestion, true);
+      assert.equal(buildAssistantView({ ...current, focus: { topicId: "team", qaId: "interviewer" } }, lines).candidateQuestion, false);
+    }
+  } finally {
+    source.close();
+    target.close();
+    cleanupTestConfig(sourceConfig);
+    cleanupTestConfig(targetConfig);
+  }
+});
+
+test("question ownership preserves supported roles and legacy omissions without trusting invalid roles", () => {
+  const config = createTestConfig("assistant-question-role-validation-");
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    const interview = store.createInterview(sampleInterview());
+    const legacy = store.saveAssistantState(interview.id, state());
+    assert.equal(Object.hasOwn(legacy.topics[0], "askedBy"), false);
+    assert.equal(Object.hasOwn(legacy.topics[0].qas[0], "askedBy"), false);
+    for (const askedBy of ["interviewer", "candidate", "unknown", "unsupported", null]) {
+      const input = state();
+      input.topics[0].askedBy = askedBy;
+      input.topics[0].qas[0].askedBy = askedBy;
+      const saved = store.saveAssistantState(interview.id, input);
+      const expected = ["interviewer", "candidate", "unknown"].includes(askedBy) ? askedBy : "unknown";
+      assert.equal(saved.topics[0].askedBy, expected);
+      assert.equal(saved.topics[0].qas[0].askedBy, expected);
+      assert.equal(Object.hasOwn(saved.topics[0].qas[1], "askedBy"), false);
+    }
+  } finally {
+    store.close();
+    cleanupTestConfig(config);
+  }
+});
+
+test("focus only names an existing topic and its QA, while legacy states keep their original shape", () => {
+  const config = createTestConfig("assistant-focus-validation-");
+  const store = new SqliteStore(config, silentLogger);
+  try {
+    const interview = store.createInterview(sampleInterview());
+    const legacy = store.saveAssistantState(interview.id, state());
+    assert.deepEqual(legacy.topics, state().topics);
+    assert.deepEqual(legacy.followups, state().followups);
+    assert.equal(Object.hasOwn(legacy, "focus"), false);
+    const topicFocus = store.saveAssistantState(interview.id, { ...legacy, focus: { topicId: "runtime", evidenceLineIds: ["line-2", "line-2"] } });
+    assert.deepEqual(topicFocus.focus, { topicId: "runtime", evidenceLineIds: ["line-2"] });
+    const otherTopic = { id: "other", title: "其他话题", origin: "outline", summary: "", status: "unasked", qas: [] };
+    for (const focus of [null, "runtime", [], { topicId: "missing" }, { topicId: "runtime", qaId: "missing" }, { topicId: "other", qaId: "ownership" }]) {
+      const saved = store.saveAssistantState(interview.id, { ...legacy, topics: [...legacy.topics, otherTopic], focus });
+      assert.equal(saved.focus, null);
+    }
+    const unsupportedSource = store.saveAssistantState(interview.id, state({ followups: [{ ...state().followups[0], source: "imported" }] }));
+    assert.equal(Object.hasOwn(unsupportedSource.followups[0], "source"), false);
+  } finally {
+    store.close();
     cleanupTestConfig(config);
   }
 });

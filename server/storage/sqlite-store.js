@@ -2534,19 +2534,24 @@ function normalizeAssistantState(state) {
   const evidenceIds = (items) => Array.isArray(items)
     ? [...new Set(items.map((item) => cleanText(item, 1000)).filter(Boolean))]
     : [];
-  return {
+  const normalized = {
     revision: nonnegativeInteger(value.revision),
     processedLineCount: nonnegativeInteger(value.processedLineCount),
     updatedAt: normalizeDate(value.updatedAt) || null,
     topics: (Array.isArray(value.topics) ? value.topics : []).filter(isObject).map((topic) => ({
       id: cleanText(topic.id, 160) || crypto.randomUUID(),
       title: cleanText(topic.title, 4000),
+      ...(Object.hasOwn(topic, "shortTitle") ? { shortTitle: cleanText(topic.shortTitle, 12) } : {}),
+      ...(Object.hasOwn(topic, "askedBy") ? { askedBy: ["interviewer", "candidate", "unknown"].includes(topic.askedBy) ? topic.askedBy : "unknown" } : {}),
       origin: topic.origin === "emergent" ? "emergent" : "outline",
       summary: cleanText(topic.summary, 50000),
       status: ["unasked", "answering", "partial", "covered"].includes(topic.status) ? topic.status : "unasked",
+      ...(Array.isArray(topic.evidenceLineIds) ? { evidenceLineIds: evidenceIds(topic.evidenceLineIds) } : {}),
       qas: (Array.isArray(topic.qas) ? topic.qas : []).filter(isObject).map((qa) => ({
         id: cleanText(qa.id, 160) || crypto.randomUUID(),
         question: cleanText(qa.question, 50000),
+        ...(Object.hasOwn(qa, "shortQuestion") ? { shortQuestion: cleanText(qa.shortQuestion, 24) } : {}),
+        ...(Object.hasOwn(qa, "askedBy") ? { askedBy: ["interviewer", "candidate", "unknown"].includes(qa.askedBy) ? qa.askedBy : "unknown" } : {}),
         answer: cleanText(qa.answer, 100000),
         status: ["answering", "partial", "answered"].includes(qa.status) ? qa.status : "partial",
         evidenceLineIds: evidenceIds(qa.evidenceLineIds),
@@ -2558,9 +2563,27 @@ function normalizeAssistantState(state) {
       topicId: cleanText(item.topicId, 160),
       ...(item.qaId ? { qaId: cleanText(item.qaId, 160) } : {}),
       question: cleanText(item.question, 50000),
+      ...(Object.hasOwn(item, "purpose") ? { purpose: cleanText(item.purpose, 8) } : {}),
+      ...(["automatic", "manual"].includes(item.source) ? { source: item.source } : {}),
       evidenceLineIds: evidenceIds(item.evidenceLineIds),
     })),
   };
+  if (Object.hasOwn(value, "focus")) {
+    normalized.focus = null;
+    if (isObject(value.focus)) {
+      const topicId = cleanText(value.focus.topicId, 160);
+      const qaId = cleanText(value.focus.qaId, 160);
+      const topic = normalized.topics.find((item) => item.id === topicId);
+      if (topic && (!qaId || topic.qas.some((qa) => qa.id === qaId))) {
+        normalized.focus = {
+          topicId,
+          ...(qaId ? { qaId } : {}),
+          evidenceLineIds: evidenceIds(value.focus.evidenceLineIds),
+        };
+      }
+    }
+  }
+  return normalized;
 }
 
 function mapAssistantJob(row) {

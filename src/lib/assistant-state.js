@@ -1,4 +1,5 @@
 export const ASSISTANT_INTERVAL_MS = 30_000;
+export const ASSISTANT_ERROR_COOLDOWN_MS = 60_000;
 export const EMPTY_ASSISTANT_STATE = Object.freeze({ revision: 0, processedLineCount: 0, topics: [], followups: [], updatedAt: null });
 
 export function isAssistantJobPending(job) {
@@ -13,9 +14,17 @@ export function newerAssistantState(current, incoming) {
   return incoming;
 }
 
-export function shouldAutoSummarize({ recording, autoEnabled, lineCount, state, jobs, submitting }) {
-  return Boolean(recording && autoEnabled && !submitting && lineCount > (state?.processedLineCount || 0)
-    && !jobs.some(isAssistantJobPending) && !["error", "cancelled"].includes(jobs[0]?.status));
+export function shouldAutoSummarize({ recording, autoEnabled, lineCount, state, jobs, submitting, now = Date.now() }) {
+  if (!recording || !autoEnabled || submitting || lineCount <= (state?.processedLineCount || 0)
+    || jobs.some(isAssistantJobPending) || jobs[0]?.status === "cancelled") return false;
+  const latest = jobs[0];
+  if (latest?.status === "error") {
+    // New speech can complete an unfinished statement. Resume once it arrives,
+    // with a cooldown; never loop indefinitely over the same failed input.
+    return lineCount > latest.targetLineCount
+      && now - Date.parse(latest.updatedAt) >= ASSISTANT_ERROR_COOLDOWN_MS;
+  }
+  return true;
 }
 
 // A failed write retains its batch. The assistant must wait for persistence,

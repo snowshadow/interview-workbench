@@ -115,6 +115,8 @@ export function useInterviewAssistant({ interviewId, enabled, recording, lineCou
         else await refresh(id, epoch);
         return;
       }
+      await current.current.beforeRequest(id);
+      if (generation.current !== epoch || current.current.interviewId !== id) return;
       await requestJson(`/api/assistant-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
       await refresh(id, epoch);
     } catch (err) { if (epoch === generation.current) setError(err.message || "重试失败"); }

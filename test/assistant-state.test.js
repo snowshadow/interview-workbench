@@ -32,6 +32,18 @@ test("manual assistant requests can await all pending transcript writes in order
   assert.deepEqual(writes, [["round-a", ["question"]], ["round-a", ["answer"]]]);
 });
 
+test("automatic summaries recover after failure only with new speech and a cooldown", () => {
+  const now = Date.parse("2026-09-15T04:02:00Z");
+  const job = { mode: "summary", status: "error", targetLineCount: 12, updatedAt: "2026-09-15T04:00:00Z" };
+  const input = { now, recording: true, autoEnabled: true, lineCount: 14, state: { processedLineCount: 10 }, jobs: [job], submitting: "" };
+  assert.equal(shouldAutoSummarize(input), true);
+  assert.equal(shouldAutoSummarize({ ...input, lineCount: 12 }), false);
+  assert.equal(shouldAutoSummarize({ ...input, now: now - 90_000 }), false);
+  assert.equal(shouldAutoSummarize({ ...input, jobs: [{ ...job, status: "cancelled" }] }), false);
+  assert.equal(shouldAutoSummarize({ ...input, autoEnabled: false }), false);
+  assert.equal(shouldAutoSummarize({ ...input, recording: false }), false);
+});
+
 test("failed transcript writes stay available for retry without blocking another round", async () => {
   let failed = true;
   const writes = [];

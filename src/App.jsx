@@ -1866,7 +1866,7 @@ function App() {
           saveState={annotationSaveStates[activeApplication.id] || "saved"} />
 
         <SplitPane id="assistant-panels" preferenceKey="assistSplit" className="assist-pane" direction="vertical"
-          label="调整 AI 面试助手与实时转录高度" defaultSize={72} minPrimary={190} minSecondary={130}>
+          label="调整 AI 面试助手与实时转录高度" defaultSize={72} minPrimary={360} minSecondary={130}>
           <InterviewAssistantPanel key={`${activeInterviewId}:${assistantResetKey}`}
             state={assistant.state} lines={lines} speakerLabels={speakerLabels} jobs={assistant.jobs}
             autoEnabled={assistant.autoEnabled} onToggleAuto={assistant.toggleAuto}

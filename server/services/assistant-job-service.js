@@ -71,15 +71,18 @@ export class AssistantJobService {
       || (mode === "summary" ? pending.find((job) => job.mode === "followup") : null);
     if (existing) {
       const job = targetLineCount > existing.payload.targetLineCount
-        ? this.store.updateAssistantJob(existing.id, { payload: snapshot(interview, state) })
+        ? this.store.updateAssistantJob(existing.id, { payload: { ...existing.payload, ...snapshot(interview, state) } })
         : existing;
       this.schedule();
       return job;
     }
+    const previous = this.store.listAssistantJobs(interviewId)[0];
+    const validationFeedback = previous?.status === "error"
+      ? previous.payload.validationFeedback || validationFeedbackFor({ message: previous.error }) : "";
     const job = this.store.createAssistantJob({
       interviewId,
       mode,
-      payload: snapshot(interview, state),
+      payload: { ...snapshot(interview, state), ...(validationFeedback ? { validationFeedback } : {}) },
       idempotencyKey: crypto.randomUUID(),
       maxAttempts: this.maxAttempts,
     });
@@ -93,8 +96,26 @@ export class AssistantJobService {
   }
 
   retry(id) {
-    const job = this.store.retryAssistantJob(id);
+    const previous = this.get(id);
+    if (!previous || !["error", "cancelled"].includes(previous.status)) return null;
+    const interview = this.store.getInterview(previous.interviewId);
+    if (!interview) return null;
+    const state = this.store.getAssistantState(previous.interviewId) || EMPTY_STATE;
+    const pending = this.store.listAssistantJobs(previous.interviewId, { pendingOnly: true })
+      .find((job) => job.mode === previous.mode || (previous.mode === "summary" && job.mode === "followup"));
+    if (pending) {
+      const job = interview.lines.length > pending.payload.targetLineCount
+        ? this.store.updateAssistantJob(pending.id, { payload: { ...pending.payload, ...snapshot(interview, state) } }) : pending;
+      this.schedule();
+      return job;
+    }
+    let job = this.store.retryAssistantJob(id);
     if (job) {
+      job = this.store.updateAssistantJob(id, { payload: {
+        ...previous.payload,
+        ...snapshot(interview, state),
+        validationFeedback: previous.payload.validationFeedback || validationFeedbackFor({ message: previous.error }),
+      } });
       this.retryAt.delete(id);
       this.schedule();
     }
@@ -156,6 +177,19 @@ export class AssistantJobService {
     this.retryAt.delete(job.id);
     let lineOffset = 0;
     try {
+      if (job.mode === "summary") {
+        const interview = this.store.getInterview(job.interviewId);
+        if (!interview) throw serviceError("面试场次不存在", 404);
+        verifySnapshot(interview.lines, job.payload);
+        if (interview.lines.length > job.payload.targetLineCount) {
+          // Catch up once per automatic attempt; new arrivals during this
+          // attempt wait for the next request instead of extending it forever.
+          this.store.updateAssistantJob(job.id, { payload: {
+            ...job.payload,
+            ...snapshot(interview, this.store.getAssistantState(job.interviewId) || EMPTY_STATE),
+          } });
+        }
+      }
       let generatedFollowup = false;
       while (true) {
         checkAbort(controller);
@@ -182,6 +216,8 @@ export class AssistantJobService {
           roleMarkdown: interview.roleMarkdown || "",
           currentRoundFocus: interview.roundFocus || "",
           speakerLabels: interview.speakerLabels || {},
+          validationFeedback: currentJob.payload.validationFeedback || "",
+          isLatestChunk: chunk.end >= target,
         }, { signal: controller.signal });
         if (generation !== this.generation) return null;
         checkAbort(controller);
@@ -196,17 +232,23 @@ export class AssistantJobService {
           error.code = "ASSISTANT_STATE_CONFLICT";
           throw error;
         }
-        // A second manual click can extend this job while the model is running.
-        // Keep its new suggestions private until the latest requested text is covered.
-        const followups = mode === "followup" && latestJob.payload.targetLineCount > chunk.end
-          ? state.followups : result.followups;
+        // A historical chunk (or a request extended while the model was running)
+        // must not publish a next question for speech we have not caught up to.
+        const followups = latestJob.payload.targetLineCount > chunk.end
+          ? result.followups.filter((item) => item.source === "manual" && !item.qaId
+            && result.topics.some((topic) => topic.id === item.topicId && topic.status === "unasked"))
+          : result.followups;
         this.store.saveAssistantState(job.interviewId, {
           ...state,
           topics: result.topics,
           followups,
+          ...(Object.hasOwn(result, "focus") ? { focus: result.focus } : {}),
           processedLineCount: Math.max(start, chunk.end),
           updatedAt: new Date().toISOString(),
         }, { expectedRevision: state.revision });
+        if (latestJob.payload.validationFeedback) {
+          this.store.updateAssistantJob(job.id, { payload: { ...latestJob.payload, validationFeedback: "" } });
+        }
         lineOffset = chunk.nextOffset;
         generatedFollowup = mode === "followup" && latestJob.payload.targetLineCount <= chunk.end;
       }
@@ -227,10 +269,15 @@ export class AssistantJobService {
         });
       }
       const willRetry = isRetriable(error) && attempt < job.maxAttempts;
+      const validationFeedback = validationFeedbackFor(error);
       if (willRetry) this.retryAt.set(job.id, Date.now() + Math.min(5000, 800 * attempt));
-      this.logger[willRetry ? "warn" : "error"]("assistant.failed", { jobId: job.id, attempt, willRetry, error });
+      this.logger[willRetry ? "warn" : "error"]("assistant.failed", {
+        jobId: job.id, attempt, willRetry, error,
+        ...(validationFeedback ? { validationFeedback } : {}),
+      });
       return this.store.updateAssistantJob(job.id, {
         status: willRetry ? "retrying" : "error", attempts: attempt, error: error.message || "整理失败",
+        ...(validationFeedback ? { payload: { ...latest.payload, validationFeedback } } : {}),
       });
     } finally {
       if (generation === this.generation && this.running.get(job.id)?.controller === controller) {
@@ -247,6 +294,13 @@ function snapshot(interview, state) {
     baseRevision: state.revision,
     lineDigests: interview.lines.map(lineDigest),
   };
+}
+
+function validationFeedbackFor(error) {
+  if (typeof error?.validationFeedback === "string") return error.validationFeedback.trim().slice(0, 8000);
+  const message = String(error?.message || "");
+  return error?.code === "ASSISTANT_INVALID_OUTPUT" || /(?:LLM.*JSON|Assistant returned invalid JSON)/i.test(message)
+    ? message.slice(0, 8000) : "";
 }
 
 function lineDigest(line) {
