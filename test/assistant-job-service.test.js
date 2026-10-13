@@ -39,6 +39,134 @@ test("a failed provider call does not advance the cursor and retry uses the late
   assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 2);
 });
 
+test("validation feedback is persisted, logged, and cleared after the corrected chunk", async () => {
+  let attempts = 0;
+  const logs = [];
+  const feedback = "topics[0].qas[0].evidenceLineIds[0]: L99 is not in the provided sources; use only listed source aliases.";
+  const fixture = setup(async (input) => {
+    if (++attempts === 1) throw validationError(feedback);
+    return unchanged(input);
+  }, { chunkLines: 1, logger: { info() {}, warn: (_event, fields) => logs.push(fields), error: (_event, fields) => logs.push(fields) } });
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  await fixture.service.run(job);
+  assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 0);
+  assert.equal(fixture.service.get(job.id).payload.validationFeedback, feedback);
+  assert.equal(logs[0].validationFeedback, feedback);
+  await fixture.service.run(fixture.service.get(job.id));
+  assert.equal(fixture.calls[1].validationFeedback, feedback);
+  assert.equal(fixture.calls[2].validationFeedback, "", "feedback for the corrected chunk must not leak into the next chunk");
+  assert.equal(fixture.service.get(job.id).payload.validationFeedback, "");
+  assert.equal(fixture.service.get(job.id).status, "done");
+});
+
+test("an automatic retry catches up with newly persisted transcript and retains correction feedback", async () => {
+  let attempts = 0;
+  const feedback = "topics[0].qas[0]: represent the candidate's spontaneous statement without inventing a question.";
+  const fixture = setup(async (input) => { if (++attempts === 1) throw validationError(feedback); return unchanged(input); });
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  await fixture.service.run(job);
+  fixture.interviews.r1.lines.push({ id: "a2", text: "候选人继续补充" });
+  await fixture.service.run(fixture.service.get(job.id));
+  assert.equal(fixture.service.get(job.id).payload.targetLineCount, 3);
+  assert.deepEqual(fixture.calls[1].transcriptLines.map((line) => line.id), ["q1", "a1", "a2"]);
+  assert.equal(fixture.calls[1].validationFeedback, feedback);
+  assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 3);
+});
+
+test("extending a pending snapshot preserves its previous validation feedback", async () => {
+  const feedback = "topics[0].qas[0].evidenceLineIds: use the listed source aliases.";
+  const fixture = setup(async () => { throw validationError(feedback); });
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  await fixture.service.run(job);
+  fixture.interviews.r1.lines.push({ id: "a2", text: "新增回答" });
+  const merged = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  assert.equal(merged.id, job.id);
+  assert.equal(merged.payload.targetLineCount, 3);
+  assert.equal(merged.payload.validationFeedback, feedback);
+});
+
+test("manual retry refreshes the terminal job's snapshot and generates suggestions after catching up", async () => {
+  let attempts = 0;
+  const feedback = "topics[0].qas[0].evidenceLineIds: invalid source alias.";
+  const fixture = setup(async (input) => { if (++attempts === 1) throw validationError(feedback); return unchanged(input); }, { maxAttempts: 1, chunkLines: 2 });
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "followup" });
+  await fixture.service.run(job);
+  assert.equal(fixture.service.get(job.id).status, "error");
+  fixture.interviews.r1.lines.push(...[2, 3, 4].map((index) => ({ id: `a${index}`, text: "更多实际回答" })));
+  const retried = fixture.service.retry(job.id);
+  assert.equal(retried.id, job.id);
+  assert.equal(retried.mode, "followup");
+  assert.equal(retried.attempts, 0);
+  assert.equal(retried.payload.targetLineCount, 5);
+  assert.equal(retried.payload.lineDigests.length, 5);
+  assert.equal(retried.payload.validationFeedback, feedback);
+  await fixture.service.run(retried);
+  assert.deepEqual(fixture.calls.slice(1).map((call) => call.mode), ["summary", "summary", "followup"]);
+  assert.equal(fixture.calls[1].validationFeedback, feedback);
+  assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 5);
+});
+
+test("a fresh manual request inherits the latest failure's feedback, and retrying the old job reuses it", async () => {
+  const feedback = "topics[0].qas[0].evidenceLineIds[0]: use source aliases from this request.";
+  const fixture = setup(async () => { throw validationError(feedback); }, { maxAttempts: 1 });
+  const failed = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  await fixture.service.run(failed);
+  fixture.interviews.r1.lines.push({ id: "a2", text: "新增回答" });
+  const manual = fixture.service.enqueue({ interviewId: "r1", mode: "followup" });
+  assert.equal(manual.payload.targetLineCount, 3);
+  assert.equal(manual.payload.validationFeedback, feedback);
+  const reused = fixture.service.retry(failed.id);
+  assert.equal(reused.id, manual.id);
+  assert.equal(fixture.service.get(failed.id).status, "error");
+  assert.equal(fixture.store.listAssistantJobs("r1", { pendingOnly: true }).length, 1);
+});
+
+test("manual requests keep their click-time snapshot while queued summaries catch up on start", async () => {
+  for (const mode of ["summary", "followup"]) {
+    const fixture = setup();
+    const job = fixture.service.enqueue({ interviewId: "r1", mode });
+    fixture.interviews.r1.lines.push({ id: "a2", text: "点击之后才到达的回答" });
+    await fixture.service.run(job);
+    const expected = mode === "summary" ? 3 : 2;
+    assert.equal(fixture.calls[0].transcriptLines.length, expected);
+    assert.equal(fixture.store.getAssistantState("r1").processedLineCount, expected);
+  }
+});
+
+test("retrying an old summary reuses pending manual work even when all lines are already covered", () => {
+  const fixture = setup();
+  const old = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  fixture.store.updateAssistantJob(old.id, { status: "error" });
+  fixture.store.saveAssistantState("r1", { ...fixture.store.getAssistantState("r1"), processedLineCount: 2 }, { expectedRevision: 0 });
+  const manual = fixture.service.enqueue({ interviewId: "r1", mode: "followup" });
+  assert.equal(fixture.service.retry(old.id).id, manual.id);
+  assert.equal(fixture.store.listAssistantJobs("r1", { pendingOnly: true }).length, 1);
+});
+
+test("validation feedback survives worker restart while transport errors stay out of the model prompt", async () => {
+  const feedback = "topics[0].qas[0].evidenceLineIds: reference a provided source.";
+  const fixture = setup(async () => { throw validationError(feedback); });
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  await fixture.service.run(job);
+  let restoredInput;
+  const resumed = new AssistantJobService({ store: fixture.store, concurrency: 0, provider: { analyze: async (input) => { restoredInput = input; return unchanged(input); } } });
+  await resumed.run(resumed.get(job.id));
+  assert.equal(restoredInput.validationFeedback, feedback);
+  const network = setup(async () => { throw new Error("network timeout"); });
+  const networkJob = network.service.enqueue({ interviewId: "r1", mode: "summary" });
+  await network.service.run(networkJob);
+  assert.equal(network.service.get(networkJob.id).payload.validationFeedback, undefined);
+});
+
+test("retrying an older failed job derives feedback from its saved validation message", async () => {
+  const fixture = setup();
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "summary" });
+  fixture.store.updateAssistantJob(job.id, { status: "error", error: "LLM JSON references evidence outside this round context" });
+  const retried = fixture.service.retry(job.id);
+  await fixture.service.run(retried);
+  assert.equal(fixture.calls[0].validationFeedback, "LLM JSON references evidence outside this round context");
+});
+
 test("long history is processed in bounded chunks with followups only after the requested snapshot", async () => {
   const fixture = setup(undefined, { chunkChars: 5, chunkLines: 2 });
   fixture.interviews.r1.lines = Array.from({ length: 8 }, (_, index) => ({ id: `l${index}`, text: "abcd" }));
@@ -47,7 +175,59 @@ test("long history is processed in bounded chunks with followups only after the 
   assert.deepEqual(fixture.calls.flatMap((call) => call.transcriptLines.map((line) => line.id)), fixture.interviews.r1.lines.map((line) => line.id));
   assert.ok(fixture.calls.every((call) => call.transcriptLines.reduce((sum, line) => sum + line.text.length, 0) <= 5));
   assert.deepEqual(fixture.calls.map((call) => call.mode), [...Array(7).fill("summary"), "followup"]);
+  assert.deepEqual(fixture.calls.map((call) => call.isLatestChunk), [...Array(7).fill(false), true]);
   assert.equal(fixture.store.getAssistantState("r1").processedLineCount, 8);
+});
+
+test("automatic progress saves the latest focus and publishes a suggestion only after catching up", async () => {
+  const observed = [];
+  const fixture = setup(async (input) => {
+    if (input.state.processedLineCount) observed.push(input.state);
+    const line = input.transcriptLines.at(-1);
+    return {
+      topics: [{ id: "runtime", shortTitle: "状态恢复", status: "answering", qas: [] }],
+      focus: { topicId: "runtime", evidenceLineIds: [line.id] },
+      followups: [{ id: "suggestion", topicId: "runtime", question: "怎样恢复？", source: "automatic", evidenceLineIds: [line.id] }],
+    };
+  }, { chunkLines: 1 });
+  await fixture.service.run(fixture.service.enqueue({ interviewId: "r1", mode: "summary" }));
+  assert.deepEqual(fixture.calls.map((call) => call.isLatestChunk), [false, true]);
+  assert.deepEqual(observed[0].focus.evidenceLineIds, ["q1"]);
+  assert.deepEqual(observed[0].followups, []);
+  const saved = fixture.store.getAssistantState("r1");
+  assert.deepEqual(saved.focus.evidenceLineIds, ["a1"]);
+  assert.equal(saved.followups[0].source, "automatic");
+});
+
+test("an extended request cannot publish its earlier next question under a newer focus", async () => {
+  const gate = deferred();
+  let count = 0;
+  let intermediate;
+  const fixture = setup(async (input) => {
+    if (++count === 1) await gate.promise;
+    else intermediate = input.state;
+    return {
+      topics: [{ id: "runtime", status: "answering", qas: [] }],
+      focus: { topicId: "runtime", evidenceLineIds: [input.transcriptLines.at(-1).id] },
+      followups: [{ id: `f${count}`, topicId: "runtime", question: "怎样处理？", source: "manual", evidenceLineIds: [] }],
+    };
+  });
+  const job = fixture.service.enqueue({ interviewId: "r1", mode: "followup" });
+  const running = fixture.service.run(job);
+  fixture.interviews.r1.lines.push({ id: "a2", text: "新回答" });
+  fixture.service.enqueue({ interviewId: "r1", mode: "followup" });
+  gate.resolve();
+  await running;
+  assert.deepEqual(intermediate.followups, []);
+  assert.deepEqual(fixture.store.getAssistantState("r1").focus.evidenceLineIds, ["a2"]);
+  assert.equal(fixture.store.getAssistantState("r1").followups[0].id, "f2");
+});
+
+test("an explicit cleared focus is persisted instead of retaining the previous current topic", async () => {
+  const fixture = setup(async (input) => ({ ...unchanged(input), focus: null }));
+  fixture.store.saveAssistantState("r1", { ...fixture.store.getAssistantState("r1"), focus: { topicId: "old", evidenceLineIds: [] } }, { expectedRevision: 0 });
+  await fixture.service.run(fixture.service.enqueue({ interviewId: "r1", mode: "summary" }));
+  assert.equal(fixture.store.getAssistantState("r1").focus, null);
 });
 
 test("a single oversized transcript line is not truncated and its cursor waits for all fragments", async () => {
@@ -254,6 +434,13 @@ function unchanged(input) {
   return { topics: input.state.topics, followups: input.state.followups };
 }
 
+function validationError(feedback) {
+  const error = new Error("Assistant output failed validation");
+  error.code = "ASSISTANT_INVALID_OUTPUT";
+  error.validationFeedback = feedback;
+  return error;
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });
@@ -292,7 +479,7 @@ function setup(analyze = unchanged, options = {}) {
       jobs.set(id, job);
       return structuredClone(job);
     },
-    listAssistantJobs: (id, { pendingOnly } = {}) => [...jobs.values()].filter((job) => job.interviewId === id && (!pendingOnly || ["queued", "running", "retrying"].includes(job.status))).map((job) => structuredClone(job)),
+    listAssistantJobs: (id, { pendingOnly } = {}) => [...jobs.values()].reverse().filter((job) => job.interviewId === id && (!pendingOnly || ["queued", "running", "retrying"].includes(job.status))).map((job) => structuredClone(job)),
     listRunnableAssistantJobs: () => [...jobs.values()].filter((job) => ["queued", "retrying"].includes(job.status)).map((job) => structuredClone(job)),
     retryAssistantJob: (id) => store.updateAssistantJob(id, { status: "queued", attempts: 0, error: "" }),
   };
