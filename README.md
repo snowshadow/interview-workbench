@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/snowshadow/interview-workbench/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/snowshadow/interview-workbench/ci.yml?branch=main&amp;style=flat-square&amp;label=CI" alt="CI"></a>
   <a href="https://github.com/snowshadow/interview-workbench/blob/main/LICENSE"><img src="https://img.shields.io/github/license/snowshadow/interview-workbench?style=flat-square" alt="Apache 2.0 License"></a>
-  <img src="https://img.shields.io/badge/Node.js-%E2%89%A522.13-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white" alt="Node.js 22.13 or newer">
+  <img src="https://img.shields.io/badge/Node.js-%E2%89%A522.23.4-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white" alt="Node.js 22.23.4 or newer">
   <img src="https://img.shields.io/badge/Local--first-0071E3?style=flat-square" alt="Local-first">
   <img src="https://img.shields.io/badge/MCP-enabled-6B5DD3?style=flat-square" alt="MCP enabled">
   <a href="https://x.com/Alfredxia"><img src="https://img.shields.io/badge/X-@Alfredxia-000000?style=flat-square&amp;logo=x&amp;logoColor=white" alt="X @Alfredxia"></a>
@@ -134,7 +134,7 @@ AI 面试助手在转录期间每 30 秒整理新增的已确认文本，停止�
 
 ## 快速开始
 
-需要 Node.js 22.13 或更高版本。
+需要 Node.js 22.23.4 或更高版本。
 
 ```bash
 npm ci
